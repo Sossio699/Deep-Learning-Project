@@ -23,11 +23,14 @@ class MultiHeadAttention(nn.Module):
         self.w_o = nn.Linear(d_model, d_model) # Output
 
         self.scale = torch.sqrt(torch.FloatTensor([self.dim_qkv]))
-        self.dropout = dropout
+        self.dropout = nn.Dropout(dropout)
     
-    def scaled_dot_product_attention(self, Q, K, V, mask=None):
+    def scaled_dot_product_attention(self, Q, K, V, mask):
         # Compute attention scores
-        attention_scores = torch.matmul(Q, K.transpose(-1, -1)) / self.scale
+        print(Q.shape)
+        print(K.shape)
+        attention_scores = torch.matmul(Q, K.transpose(-2, -1)) / self.scale
+        print(attention_scores.shape)
 
         # Apply mask if provided (useful for preventing attention to certain parts like padding)
         if mask is not None:
@@ -38,7 +41,7 @@ class MultiHeadAttention(nn.Module):
 
         # Multiply by values to obtain the final output
         output = torch.matmul(attention_probabilities, V)
-        return output
+        return output, attention_scores
 
     def split_heads(self, x):
         # Reshape the input to have num_heads for multi-head attention
@@ -50,17 +53,21 @@ class MultiHeadAttention(nn.Module):
         batch_size, _, seq_length, dim_qkv = x.size()
         return x.transpose(1, 2).contiguous().view(batch_size, seq_length, self.d_model)
     
-    def forward(self, Q, K, V, mask=None):
+    def forward(self, Q, K, V, copy=False, mask=None):
         # Apply linear transformations and split heads
-        Q = self.split_heads(self.w_q(Q))
-        K = self.split_heads(self.w_k(K))
-        V = self.split_heads(self.w_v(V))
+        if not copy:
+            Q = self.split_heads(self.w_q(Q))
+            K = self.split_heads(self.w_k(K))
+            V = self.split_heads(self.w_v(V))
 
         #Perform scaled dot-product attention
         attention_output, attention_scores = self.scaled_dot_product_attention(Q, K, V, mask)
 
         # Combine heads and apply output transformation
-        output = self.w_o(self.combine_heads(attention_output))
+        if not copy:
+            output = self.w_o(self.combine_heads(attention_output))
+        else:
+            output = attention_output
         return output, attention_scores
 
 
@@ -69,11 +76,11 @@ class MultiHeadAttention_relE(MultiHeadAttention):
         super(MultiHeadAttention_relE, self).__init__(d_model, num_heads, dropout)
         self.max_relative_position = 16 # As indicated in the paper
         self.relative_vocab_size = self.max_relative_position * 2 + 1
-        self.relative_embeddings = nn.Embedding(self.relative_vocab_size, d_model)
+        self.relative_embeddings = nn.Embedding(self.relative_vocab_size, d_model // num_heads)
     
-    def scaled_dot_product_attention(self, Q, K, V, relative_ids, mask=None):
+    def scaled_dot_product_attention(self, Q, K, V, relative_ids, mask):
         # Compute attention scores
-        mat_qk = torch.matmul(Q, K.transpose(-1, -1))
+        mat_qk = torch.matmul(Q, K.transpose(-2, -1))
         rp_k = self.relative_embeddings(relative_ids)
         mat_qr = torch.einsum("bhqd,qkd->bhqk", Q, rp_k) # Einstein summation
         attention_scores = (mat_qk + mat_qr) / self.scale # Scaled attention scores with relative positional encoding
@@ -89,7 +96,12 @@ class MultiHeadAttention_relE(MultiHeadAttention):
         output = torch.matmul(attention_weights, V)
         return output, attention_scores
 
-    def forward(self, Q, K, V, relative_ids, mask=None):
+    def forward(self, Q, K, V, relative_ids, mask):
+        # Apply linear transformations and split heads
+        Q = self.split_heads(self.w_q(Q))
+        K = self.split_heads(self.w_k(K))
+        V = self.split_heads(self.w_v(V))
+        
         #Perform scaled dot-product attention
         attention_output, attention_scores = self.scaled_dot_product_attention(Q, K, V, relative_ids, mask)
 
@@ -105,9 +117,9 @@ class MultiHeadAttention_relB(MultiHeadAttention):
         self.relative_vocab_size = self.max_relative_position * 2 + 1
         self.relative_bias = nn.Embedding(self.relative_vocab_size, 1)
     
-    def scaled_dot_product_attention(self, Q, K, V, relative_ids, mask=None):
+    def scaled_dot_product_attention(self, Q, K, V, relative_ids, mask):
         # Compute attention scores
-        attention_scores = torch.matmul(Q, K.transpose(-1, -1)) / self.scale
+        attention_scores = torch.matmul(Q, K.transpose(-2, -1)) / self.scale
 
         bias = self.relative_bias(relative_ids)
         attention_scores = attention_scores + torch.squeeze(bias, -1)
@@ -123,7 +135,12 @@ class MultiHeadAttention_relB(MultiHeadAttention):
         output = torch.matmul(attention_weights, V)
         return output, attention_scores
 
-    def forward(self, Q, K, V, relative_ids, mask=None):
+    def forward(self, Q, K, V, relative_ids, mask):
+        # Apply linear transformations and split heads
+        Q = self.split_heads(self.w_q(Q))
+        K = self.split_heads(self.w_k(K))
+        V = self.split_heads(self.w_v(V))
+
         #Perform scaled dot-product attention
         attention_output, attention_scores = self.scaled_dot_product_attention(Q, K, V, relative_ids, mask)
 
@@ -137,13 +154,17 @@ class MultiHeadAttention_relEB(MultiHeadAttention):
         super(MultiHeadAttention_relEB, self).__init__(d_model, num_heads, dropout)
         self.max_relative_position = 16 # As indicated in the paper
         self.relative_vocab_size = self.max_relative_position * 2 + 1
-        self.relative_embeddings = nn.Embedding(self.relative_vocab_size, d_model)
+        self.relative_embeddings = nn.Embedding(self.relative_vocab_size, d_model // num_heads)
         self.relative_bias = nn.Embedding(self.relative_vocab_size, 1)
     
-    def scaled_dot_product_attention(self, Q, K, V, relative_ids, mask=None):
+    def scaled_dot_product_attention(self, Q, K, V, relative_ids, mask):
         # Compute attention scores
-        mat_qk = torch.matmul(Q, K.transpose(-1, -1))
+        print(Q.shape)
+        print(K.shape)
+        mat_qk = torch.matmul(Q, K.transpose(-2, -1))
         rp_k = self.relative_embeddings(relative_ids)
+        print(rp_k.shape)
+        print(Q.shape)
         mat_qr = torch.einsum("bhqd,qkd->bhqk", Q, rp_k) # Einstein summation
         attention_scores = (mat_qk + mat_qr) / self.scale # Scaled attention scores with relative positional encoding
 
@@ -161,7 +182,12 @@ class MultiHeadAttention_relEB(MultiHeadAttention):
         output = torch.matmul(attention_weights, V)
         return output, attention_scores
     
-    def forward(self, Q, K, V, relative_ids, mask=None):
+    def forward(self, Q, K, V, relative_ids, mask):
+        # Apply linear transformations and split heads
+        Q = self.split_heads(self.w_q(Q))
+        K = self.split_heads(self.w_k(K))
+        V = self.split_heads(self.w_v(V))
+
         #Perform scaled dot-product attention
         attention_output, attention_scores = self.scaled_dot_product_attention(Q, K, V, relative_ids, mask)
 

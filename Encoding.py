@@ -32,14 +32,14 @@ def create_relative_ids(inp_len, tar_len, max_relative_position, dec2enc_ids):
       diff = max_relative_position + min(max(diff, -max_relative_position), max_relative_position)
       enc_relative_ids[i][j] = diff
 
-  dec_relative_ids1 = np.zeros([tar_len-1, tar_len-1], dtype=int)
+  dec_relative_ids1 = np.zeros([tar_len, tar_len], dtype=int) # era tar_len - 1, tar_len - 1
   for i in range(tar_len-1):
     for j in range(tar_len-1):
       diff = i - j
       diff = max_relative_position + min(max(diff, -max_relative_position), max_relative_position)
       dec_relative_ids1[i][j] = diff
 
-  dec2enc_relative_ids = np.zeros([tar_len-1, inp_len], dtype=int)
+  dec2enc_relative_ids = np.zeros([tar_len, inp_len], dtype=int) # era tar_len - 1
   for i in range(tar_len-1):
     for j in range(inp_len):
       if dec2enc_ids:
@@ -49,4 +49,4 @@ def create_relative_ids(inp_len, tar_len, max_relative_position, dec2enc_ids):
       else:
         dec2enc_relative_ids[i][j] = max_relative_position
 
-  return (enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids)
+  return (torch.IntTensor(enc_relative_ids), torch.IntTensor(dec_relative_ids1), torch.IntTensor(dec2enc_relative_ids))
