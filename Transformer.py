@@ -5,6 +5,15 @@ from torch.nn import functional as F
 import Attention
 import Encoding
 
+# Utilities for masks
+def look_ahead_mask(size):
+  mask = (torch.triu(torch.ones(size, size)) == 1).transpose(0, 1)
+  mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
+  return mask
+
+def padding_mask(seq):
+    return 0
+
 
 # FC layers are applied along the last (512) dimension
 class FeedForward(nn.Module):
@@ -244,8 +253,8 @@ class Transformer(nn.Module):
 
     def generate_mask(self, src, trg):
         src_mask = (src != 0).unsqueeze(1).unsqueeze(2)
-        trg_mask = (trg != 0).unsqueeze(1).unsqueeze(2)
-        seq_length = trg.size(0)
+        trg_mask = (trg != 0).unsqueeze(1).unsqueeze(3)
+        seq_length = trg.size(1)
         nopeak_mask = (1 - torch.triu(torch.ones(1, seq_length, seq_length), diagonal=1)).bool()
         trg_mask = trg_mask & nopeak_mask
         return src_mask, trg_mask
@@ -256,10 +265,10 @@ class Transformer(nn.Module):
         tgt_embedded = self.dropout(self.positional_encoding_dec(self.decoder_embedding(trg)))
 
         enc_output = src_embedded
-        enc_output = self.encoder(enc_output)#, src_mask)
+        enc_output = self.encoder(enc_output, src_mask)
 
         dec_output = tgt_embedded
-        dec_output = self.decoder(dec_output, enc_output)#, trg_mask, src_mask)
+        dec_output = self.decoder(dec_output, enc_output, src_mask, trg_mask)
         output = torch.softmax(self.fc(dec_output), dim=-1)
 
         return output
@@ -276,21 +285,21 @@ class ExtendedTransformer1(Transformer):
         tgt_embedded = self.dropout(self.positional_encoding_dec(self.decoder_embedding(trg)))
 
         enc_output = src_embedded
-        enc_output = self.encoder(enc_output, enc_relative_ids)#, src_mask)
+        enc_output = self.encoder(enc_output, enc_relative_ids, src_mask)
 
         dec_output = tgt_embedded
-        dec_output = self.decoder(dec_output, enc_output, dec_relative_ids1, dec2enc_relative_ids)#, trg_mask, src_mask)
+        dec_output = self.decoder(dec_output, enc_output, dec_relative_ids1, dec2enc_relative_ids, trg_mask, src_mask)
         output = torch.softmax(self.fc(dec_output), dim=-1)
 
         return output
 
 
 class CopyDecoder(nn.Module):
-    def __init__(self, trg_vocab_size, d_model, num_heads, dropout):
+    def __init__(self, d_model, num_heads, dropout):
         super(CopyDecoder, self).__init__()
         self.attention = Attention.MultiHeadAttention(d_model, num_heads, dropout) # Nel codice non usano quella con RPE
 
-        self.fco = nn.Linear(d_model, d_model) #TODO capire dimensionalità di questi due layer
+        self.fcQ = nn.Linear(d_model, d_model)
         self.fcw = nn.Linear(d_model, 1)
     
     # p1 è l'output del Transformer senza il Copy Decoder
@@ -299,7 +308,7 @@ class CopyDecoder(nn.Module):
         src_one_hot = src_one_hot.float()
         print(src_one_hot.shape)
 
-        copy_query = self.fco(dec_output)
+        copy_query = self.fcQ(dec_output)
         a_output, _ = self.attention(Q=copy_query, K=enc_output, V=src_one_hot, copy=True) # Nel codice non usano una mask
         p2 = torch.softmax(a_output, dim=-1)
 
@@ -312,7 +321,7 @@ class CopyDecoder(nn.Module):
 class ExtendedTransformer2(ExtendedTransformer1):
     def __init__(self, src_vocab_size, trg_vocab_size, d, h, l, f, max_seq_length_enc, max_seq_length_dec, dropout, attention="rel-eb"):
         super(ExtendedTransformer2, self).__init__(src_vocab_size, trg_vocab_size, d, h, l, f, max_seq_length_enc, max_seq_length_dec, dropout, attention)
-        self.copy_decoder = CopyDecoder(trg_vocab_size, d, h, dropout)
+        self.copy_decoder = CopyDecoder(d, h, dropout)
     
     def forward(self, src, trg, enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids, src_vocab_size):
         src_mask, trg_mask = self.generate_mask(src, trg)
@@ -320,10 +329,10 @@ class ExtendedTransformer2(ExtendedTransformer1):
         trg_embedded = self.dropout(self.positional_encoding_dec(self.decoder_embedding(trg)))
 
         enc_output = src_embedded
-        enc_output = self.encoder(enc_output, enc_relative_ids)#, src_mask)
+        enc_output = self.encoder(enc_output, enc_relative_ids, src_mask)
 
         dec_output = trg_embedded
-        dec_output = self.decoder(dec_output, enc_output, dec_relative_ids1, dec2enc_relative_ids)#, trg_mask, src_mask)
+        dec_output = self.decoder(dec_output, enc_output, dec_relative_ids1, dec2enc_relative_ids, trg_mask, src_mask)
         output = torch.softmax(self.fc(dec_output), dim=-1)
 
         copy_output = self.copy_decoder(src_vocab_size, dec_output, enc_output, src, output)

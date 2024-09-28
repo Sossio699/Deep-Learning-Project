@@ -34,6 +34,8 @@ class MultiHeadAttention(nn.Module):
 
         # Apply mask if provided (useful for preventing attention to certain parts like padding)
         if mask is not None:
+            print(attention_scores.shape)
+            print(f"mask shape: {mask.shape}")
             attention_scores = attention_scores.masked_fill(mask == 0, -1e9)
         
         # Softmax is applied to obtain attention probabilities
