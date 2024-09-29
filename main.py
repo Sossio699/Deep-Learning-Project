@@ -31,9 +31,9 @@ def train(transformer, optimizer, scheduler, dl_train, epochs, relative_ids=None
             else:
                 predictions = transformer(source, target, relative_ids[0], relative_ids[1], relative_ids[2], src_vocab_size)
             
-            #print(f"Predictions: {predictions.shape}, requires_grad: {predictions.requires_grad}")
-            #print(f"Target: {target.shape}, requires_grad: {target.requires_grad}")
-            loss = F.cross_entropy(predictions, target, reduction="none")
+            print(f"Predictions: {predictions.shape}, requires_grad: {predictions.requires_grad}")
+            print(f"Target: {target.shape}, requires_grad: {target.requires_grad}")
+            loss = F.cross_entropy(predictions.permute(0, 2, 1), target, reduction="none")
 
             loss.mean().backward()
             optimizer.step()
@@ -74,7 +74,7 @@ def test(transformer, dl_test, relative_ids=None, src_vocab_size=None, device='c
             else:
                 predictions = transformer(source, target, relative_ids[0], relative_ids[1], relative_ids[2], src_vocab_size)   
                      
-            loss_val = F.cross_entropy(predictions, target, reduction="none")
+            loss_val = F.cross_entropy(predictions.permute(0, 2, 1), target, reduction="none")
             test_losses.append(loss_val.detach().numpy())
             sl_accuracy = sequence_level_accuracy(predictions, target)
             sl_accuracies.append(sl_accuracy)
@@ -107,7 +107,7 @@ class CustomDataset(Dataset):
 
     def __getitem__(self, idx):
         return self.input[idx], self.target[idx]
-
+'''
 # Add dataset
 (add_vocab, add_vocab_to_int, input_tensor_train, target_tensor_train, input_tensor_val_list, target_tensor_val_list) = Datasets.create_addition_dataset(192, 128)
 add_dataset_train = CustomDataset(input_tensor_train, target_tensor_train)
@@ -115,48 +115,63 @@ add_dataset_test = CustomDataset(input_tensor_val_list, target_tensor_val_list)
 
 add_train_loader = DataLoader(add_dataset_train, batch_size=64, shuffle=True)
 add_test_loader = DataLoader(add_dataset_test, batch_size=64, shuffle=False)
-'''
+
 # AddNeg dataset
-(addNeg_vocab, addNeg_vocab_to_int, input_tensor_train, target_tensor_train, input_tensor_val_list, target_tensor_val_list) = Datasets.create_addition_dataset(200000, 512, negativeProbability=0.25)
+(addNeg_vocab, addNeg_vocab_to_int, input_tensor_train, target_tensor_train, input_tensor_val_list, target_tensor_val_list) = Datasets.create_addition_dataset(192, 128, negativeProbability=0.25)
 addNeg_dataset_train = CustomDataset(input_tensor_train, target_tensor_train)
 addNeg_dataset_test = CustomDataset(input_tensor_val_list, target_tensor_val_list)
 
 addNeg_train_loader = DataLoader(addNeg_dataset_train, batch_size=64, shuffle=True)
 addNeg_test_loader = DataLoader(addNeg_dataset_test, batch_size=64, shuffle=False)
-
+'''
 # Reverse dataset
-(reverse_vocab, reverse_vocab_to_int, input_tensor_train, target_tensor_train, input_tensor_val_list, target_tensor_val_list) = Datasets.create_reversing_dataset(200000, 1024)
+(reverse_vocab, reverse_vocab_to_int, input_tensor_train, target_tensor_train, input_tensor_val_list, target_tensor_val_list) = Datasets.create_reversing_dataset(192, 128)
 reverse_dataset_train = CustomDataset(input_tensor_train, target_tensor_train)
-reverse_dataset_test = CustomDataset(input_tensor_val_list, target_tensor_val_list)
+reverse_dataset_test0 = CustomDataset(input_tensor_val_list[0], target_tensor_val_list[0])
+reverse_dataset_test1 = CustomDataset(input_tensor_val_list[1], target_tensor_val_list[1])
+reverse_dataset_test2 = CustomDataset(input_tensor_val_list[2], target_tensor_val_list[2])
 
 reverse_train_loader = DataLoader(reverse_dataset_train, batch_size=64, shuffle=True)
-reverse_test_loader = DataLoader(reverse_dataset_test, batch_size=64, shuffle=False)
-
+reverse_test_loader0 = DataLoader(reverse_dataset_test0, batch_size=64, shuffle=False)
+reverse_test_loader1 = DataLoader(reverse_dataset_test1, batch_size=64, shuffle=False)
+reverse_test_loader2 = DataLoader(reverse_dataset_test2, batch_size=64, shuffle=False)
+'''
 # Dup dataset
-(dup_vocab, dup_vocab_to_int, input_tensor_train, target_tensor_train, input_tensor_val_list, target_tensor_val_list) = Datasets.create_duplicating_dataset(200000, 1024)
+(dup_vocab, dup_vocab_to_int, input_tensor_train, target_tensor_train, input_tensor_val_list, target_tensor_val_list) = Datasets.create_duplicating_dataset(192, 128)
 dup_dataset_train = CustomDataset(input_tensor_train, target_tensor_train)
-dup_dataset_test = CustomDataset(input_tensor_val_list, target_tensor_val_list)
+dup_dataset_test0 = CustomDataset(input_tensor_val_list[0], target_tensor_val_list[0])
+dup_dataset_test1 = CustomDataset(input_tensor_val_list[1], target_tensor_val_list[1])
+dup_dataset_test2 = CustomDataset(input_tensor_val_list[2], target_tensor_val_list[2])
 
 dup_train_loader = DataLoader(dup_dataset_train, batch_size=64, shuffle=True)
-dup_test_loader = DataLoader(dup_dataset_test, batch_size=64, shuffle=False)
+dup_test_loader0 = DataLoader(dup_dataset_test0, batch_size=64, shuffle=False)
+dup_test_loader1 = DataLoader(dup_dataset_test1, batch_size=64, shuffle=False)
+dup_test_loader2 = DataLoader(dup_dataset_test2, batch_size=64, shuffle=False)
 
 # Cart dataset
-(cart_vocab, cart_vocab_to_int, input_tensor_train, target_tensor_train, input_tensor_val_list, target_tensor_val_list) = Datasets.create_cartesian_dataset(200000, 1024)
+(cart_vocab, cart_vocab_to_int, input_tensor_train, target_tensor_train, input_tensor_val_list, target_tensor_val_list) = Datasets.create_cartesian_dataset(192, 128)
 cart_dataset_train = CustomDataset(input_tensor_train, target_tensor_train)
-cart_dataset_test = CustomDataset(input_tensor_val_list, target_tensor_val_list)
+cart_dataset_test0 = CustomDataset(input_tensor_val_list[0], target_tensor_val_list[0])
+cart_dataset_test1 = CustomDataset(input_tensor_val_list[1], target_tensor_val_list[1])
+cart_dataset_test2 = CustomDataset(input_tensor_val_list[2], target_tensor_val_list[2])
 
 cart_train_loader = DataLoader(cart_dataset_train, batch_size=64, shuffle=True)
-cart_test_loader = DataLoader(cart_dataset_test, batch_size=64, shuffle=False)
+cart_test_loader0 = DataLoader(cart_dataset_test0, batch_size=64, shuffle=False)
+cart_test_loader1 = DataLoader(cart_dataset_test1, batch_size=64, shuffle=False)
+cart_test_loader2 = DataLoader(cart_dataset_test2, batch_size=64, shuffle=False)
 
 # Inters dataset
-(inters_vocab, inters_vocab_to_int, input_tensor_train, target_tensor_train, input_tensor_val_list, target_tensor_val_list) = Datasets.create_intersection_dataset(200000, 1024)
+(inters_vocab, inters_vocab_to_int, input_tensor_train, target_tensor_train, input_tensor_val_list, target_tensor_val_list) = Datasets.create_intersection_dataset(192, 128)
 inters_dataset_train = CustomDataset(input_tensor_train, target_tensor_train)
-inters_dataset_test = CustomDataset(input_tensor_val_list, target_tensor_val_list)
+inters_dataset_test0 = CustomDataset(input_tensor_val_list[0], target_tensor_val_list[0])
+inters_dataset_test1 = CustomDataset(input_tensor_val_list[1], target_tensor_val_list[1])
+inters_dataset_test2 = CustomDataset(input_tensor_val_list[2], target_tensor_val_list[2])
 
 inters_train_loader = DataLoader(inters_dataset_train, batch_size=64, shuffle=True)
-inters_test_loader = DataLoader(inters_dataset_test, batch_size=64, shuffle=False)
+inters_test_loader0 = DataLoader(inters_dataset_test0, batch_size=64, shuffle=False)
+inters_test_loader1 = DataLoader(inters_dataset_test1, batch_size=64, shuffle=False)
+inters_test_loader2 = DataLoader(inters_dataset_test2, batch_size=64, shuffle=False)
 '''
-
 
 # Learning rate scheduler
 class CustomSchedule(_LRScheduler):
@@ -180,15 +195,22 @@ class CustomSchedule(_LRScheduler):
 
 def main():
     # Try transformer
-    transformer = Transformer.Transformer(len(add_vocab), len(add_vocab), d=512, h=8, l=6, f=2048, max_seq_length_enc=26, max_seq_length_dec=14, dropout=0.0).to('cpu')
+    transformer = Transformer.ExtendedTransformer1(len(reverse_vocab), len(reverse_vocab), d=512, h=8, l=6, f=2048, max_seq_length_enc=25, max_seq_length_dec=26, dropout=0.0).to('cpu')
     optimizer = torch.optim.Adam(transformer.parameters(), lr=1e-3, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
     scheduler = CustomSchedule(optimizer, d_model=512, warmup_steps=4000)
-    train_losses = train(transformer, optimizer, scheduler, add_train_loader, 2)
+    enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(17, 18, 16, False)
+    train_losses = train(transformer, optimizer, scheduler, reverse_train_loader, 2, (enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids))
     torch.save(transformer.state_dict(), './transformer_try.pth')
     print(train_losses)
     transformer.load_state_dict(torch.load('./transformer_try.pth', map_location=torch.device('cpu')))
 
-    loss, accuracy = test(transformer, add_test_loader)
+    loss0, accuracy0 = test(transformer, reverse_test_loader0, (enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids))
+    loss1, accuracy1 = test(transformer, reverse_test_loader1, (enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids))
+    enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(25, 26, 16, False)
+    loss2, accuracy2 = test(transformer, reverse_test_loader2, (enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids))
+    loss = np.mean([loss0, loss1, loss2])
+    accuracy = np.mean([accuracy0, accuracy1, accuracy2])
+
     print(f"Average loss: {loss}, average accuracy: {accuracy}")
     
     # Try transformer1
