@@ -136,12 +136,13 @@ def create_addition_dataset(trainsize, testsize, leftpadding=12, negativeProbabi
     input_tensor_val2, target_tensor_val2 = create_dataset_tensors(test_examples_in_raw, test_examples_out_raw, max_len_inp, max_len_targ, vocab_to_int)
     input_tensor_val3, target_tensor_val3 = create_dataset_tensors(test_hard_examples_in_raw, test_hard_examples_out_raw, max_len_inp, max_len_targ, vocab_to_int)
 
-    return (vocab, vocab_to_int,
-          input_tensor_train, target_tensor_train,
-          [input_tensor_val0, input_tensor_val1,
-           input_tensor_val2, input_tensor_val3],
-          [target_tensor_val0,target_tensor_val1,
-           target_tensor_val2, target_tensor_val3])
+    input_tensor_val = torch.cat((input_tensor_val0, input_tensor_val1, input_tensor_val2, input_tensor_val3))
+    target_tensor_val = torch.cat((target_tensor_val0, target_tensor_val1, target_tensor_val2, target_tensor_val3))
+
+    #print(f"train_shapes: {input_tensor_train.shape}, {target_tensor_train.shape}", dim=0)
+    #print(f"test_shapes: {input_tensor_val.shape}, {target_tensor_val.shape}", dim=0)
+
+    return (vocab, vocab_to_int, input_tensor_train, target_tensor_train, input_tensor_val, target_tensor_val)
 
 
 # Reversing dataset

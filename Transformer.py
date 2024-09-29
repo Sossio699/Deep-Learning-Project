@@ -252,10 +252,12 @@ class Transformer(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def generate_mask(self, src, trg):
+        print(trg.shape)
         src_mask = (src != 0).unsqueeze(1).unsqueeze(2)
         trg_mask = (trg != 0).unsqueeze(1).unsqueeze(3)
         seq_length = trg.size(1)
         nopeak_mask = (1 - torch.triu(torch.ones(1, seq_length, seq_length), diagonal=1)).bool()
+        print(f"trg_mask: {trg_mask.shape}, nopeak_mask: {nopeak_mask.shape}")
         trg_mask = trg_mask & nopeak_mask
         return src_mask, trg_mask
 
