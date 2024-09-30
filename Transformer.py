@@ -240,7 +240,7 @@ class ExtendedDecoder(nn.Module):
 # f: intermediate dimensionality used by the feed-forward sublayer
 # h: number of attention-heads in the attention sublayers
 class Transformer(nn.Module):
-    def __init__(self, src_vocab_size, trg_vocab_size, d, h, l, f, max_seq_length_enc, max_seq_length_dec, dropout):
+    def __init__(self, src_vocab_size, trg_vocab_size, d, h, l, f, max_seq_length_enc, max_seq_length_dec, dropout=0.0):
         super(Transformer, self).__init__()
         self.encoder_embedding = nn.Embedding(src_vocab_size, d)
         torch.nn.init.uniform_(self.encoder_embedding.weight, -0.05, 0.05) # Embedding layer initialized with U(-0.05, 0.05)
@@ -280,8 +280,9 @@ class Transformer(nn.Module):
 
         return output
 
+
 class ExtendedTransformer1(Transformer):
-    def __init__(self, src_vocab_size, trg_vocab_size, d, h, l, f, max_seq_length_enc, max_seq_length_dec, dropout, attention="rel-eb"):
+    def __init__(self, src_vocab_size, trg_vocab_size, d, h, l, f, max_seq_length_enc, max_seq_length_dec, dropout=0.0, attention="rel-eb"):
         super(ExtendedTransformer1, self).__init__(src_vocab_size, trg_vocab_size, d, h, l ,f, max_seq_length_enc, max_seq_length_dec, dropout)
         self.encoder = ExtendedEncoder(l, d, h, f, dropout, attention)
         self.decoder = ExtendedDecoder(l, d, h, f, dropout, attention)
@@ -326,9 +327,29 @@ class CopyDecoder(nn.Module):
 
         return output
 
+class ExtendedStdTransformer2(Transformer):
+    def __init__(self, src_vocab_size, trg_vocab_size, d, h, l, f, max_seq_length_enc, max_seq_length_dec, dropout=0.0):
+        super(ExtendedStdTransformer2, self).__init__(src_vocab_size, trg_vocab_size, d, h, l, f, max_seq_length_enc, max_seq_length_dec, dropout)
+        self.copy_decoder = CopyDecoder(d, h, dropout)
+
+    def forward(self, src, trg, src_vocab_size):
+        src_mask, trg_mask = self.generate_mask(src, trg)
+        src_embedded = self.dropout(self.positional_encoding_enc(self.encoder_embedding(src)))
+        tgt_embedded = self.dropout(self.positional_encoding_dec(self.decoder_embedding(trg)))
+
+        enc_output = src_embedded
+        enc_output = self.encoder(enc_output, src_mask)
+
+        dec_output = tgt_embedded
+        dec_output = self.decoder(dec_output, enc_output, src_mask, trg_mask)
+        output = torch.softmax(self.fc(dec_output), dim=-1)
+
+        copy_output = self.copy_decoder(src_vocab_size, dec_output, enc_output, src, output)
+
+        return copy_output
 
 class ExtendedTransformer2(ExtendedTransformer1):
-    def __init__(self, src_vocab_size, trg_vocab_size, d, h, l, f, max_seq_length_enc, max_seq_length_dec, dropout, attention="rel-eb"):
+    def __init__(self, src_vocab_size, trg_vocab_size, d, h, l, f, max_seq_length_enc, max_seq_length_dec, dropout=0.0, attention="rel-eb"):
         super(ExtendedTransformer2, self).__init__(src_vocab_size, trg_vocab_size, d, h, l, f, max_seq_length_enc, max_seq_length_dec, dropout, attention)
         self.copy_decoder = CopyDecoder(d, h, dropout)
     
@@ -348,8 +369,9 @@ class ExtendedTransformer2(ExtendedTransformer1):
 
         return copy_output
 
+
 class ExtendedTransformer4(ExtendedTransformer2):
-    def __init__(self, src_vocab_size, trg_vocab_size, d, h, l, f, max_seq_length_enc, max_seq_length_dec, dropout, attention="rel-eb", shared_weights=False):
+    def __init__(self, src_vocab_size, trg_vocab_size, d, h, l, f, max_seq_length_enc, max_seq_length_dec, dropout=0.0, attention="rel-eb", shared_weights=True):
         super(ExtendedTransformer4, self).__init__(src_vocab_size, trg_vocab_size, d, h, l, f, max_seq_length_enc, max_seq_length_dec, dropout, attention)
         self.encoder = ExtendedEncoder(l, d, h, f, dropout, attention, shared_weights)
         self.decoder = ExtendedDecoder(l, d, h, f, dropout, attention, shared_weights)
