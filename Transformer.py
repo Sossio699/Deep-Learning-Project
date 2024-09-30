@@ -20,7 +20,9 @@ class FeedForward(nn.Module):
     def __init__(self, d_model, hidden, dropout):
         super(FeedForward, self).__init__()
         self.linear1 = nn.Linear(d_model, hidden)
+        torch.nn.init.xavier_uniform_(self.linear1.weight) # Dense layer initialized with Glorot initializer
         self.linear2 = nn.Linear(hidden, d_model)
+        torch.nn.init.xavier_uniform_(self.linear2.weight) # Dense layer initialized with Glorot initializer
         self.relu = nn.ReLU()
         self.dropout = nn.Dropout(dropout)
 
@@ -241,7 +243,9 @@ class Transformer(nn.Module):
     def __init__(self, src_vocab_size, trg_vocab_size, d, h, l, f, max_seq_length_enc, max_seq_length_dec, dropout):
         super(Transformer, self).__init__()
         self.encoder_embedding = nn.Embedding(src_vocab_size, d)
+        torch.nn.init.uniform_(self.encoder_embedding.weight, -0.05, 0.05) # Embedding layer initialized with U(-0.05, 0.05)
         self.decoder_embedding = nn.Embedding(trg_vocab_size, d)
+        torch.nn.init.uniform_(self.decoder_embedding.weight, -0.05, 0.05) # Embedding layer initialized with U(-0.05, 0.05)
         self.positional_encoding_enc = Encoding.AbsolutePositionalEncoding(d, max_seq_length_enc)
         self.positional_encoding_dec = Encoding.AbsolutePositionalEncoding(d, max_seq_length_dec)
 
@@ -249,6 +253,7 @@ class Transformer(nn.Module):
         self.decoder = Decoder(l, d, h, f, dropout)
 
         self.fc = nn.Linear(d, trg_vocab_size)
+        torch.nn.init.xavier_uniform_(self.fc.weight) # Dense layer initialized with Glorot initializer
         self.dropout = nn.Dropout(dropout)
 
     def generate_mask(self, src, trg):
@@ -302,7 +307,9 @@ class CopyDecoder(nn.Module):
         self.attention = Attention.MultiHeadAttention(d_model, num_heads, dropout) # Nel codice non usano quella con RPE
 
         self.fcQ = nn.Linear(d_model, d_model)
+        torch.nn.init.xavier_uniform_(self.fcQ.weight) # Dense layer initialized with Glorot initializer
         self.fcw = nn.Linear(d_model, 1)
+        torch.nn.init.xavier_uniform_(self.fcw.weight) # Dense layer initialized with Glorot initializer
     
     # p1 è l'output del Transformer senza il Copy Decoder
     def forward(self, src_vocab_size, dec_output, enc_output, src, p1):

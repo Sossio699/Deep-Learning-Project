@@ -123,7 +123,7 @@ addNeg_dataset_test = CustomDataset(input_tensor_val_list, target_tensor_val_lis
 
 addNeg_train_loader = DataLoader(addNeg_dataset_train, batch_size=64, shuffle=True)
 addNeg_test_loader = DataLoader(addNeg_dataset_test, batch_size=64, shuffle=False)
-'''
+
 # Reverse dataset
 (reverse_vocab, reverse_vocab_to_int, input_tensor_train, target_tensor_train, input_tensor_val_list, target_tensor_val_list) = Datasets.create_reversing_dataset(192, 128)
 reverse_dataset_train = CustomDataset(input_tensor_train, target_tensor_train)
@@ -147,7 +147,7 @@ dup_train_loader = DataLoader(dup_dataset_train, batch_size=64, shuffle=True)
 dup_test_loader0 = DataLoader(dup_dataset_test0, batch_size=64, shuffle=False)
 dup_test_loader1 = DataLoader(dup_dataset_test1, batch_size=64, shuffle=False)
 dup_test_loader2 = DataLoader(dup_dataset_test2, batch_size=64, shuffle=False)
-
+'''
 # Cart dataset
 (cart_vocab, cart_vocab_to_int, input_tensor_train, target_tensor_train, input_tensor_val_list, target_tensor_val_list) = Datasets.create_cartesian_dataset(192, 128)
 cart_dataset_train = CustomDataset(input_tensor_train, target_tensor_train)
@@ -195,19 +195,19 @@ class CustomSchedule(_LRScheduler):
 
 def main():
     # Try transformer
-    transformer = Transformer.ExtendedTransformer1(len(reverse_vocab), len(reverse_vocab), d=512, h=8, l=6, f=2048, max_seq_length_enc=25, max_seq_length_dec=26, dropout=0.0).to('cpu')
+    transformer = Transformer.ExtendedTransformer1(len(dup_vocab), len(dup_vocab), d=512, h=8, l=6, f=2048, max_seq_length_enc=25, max_seq_length_dec=50, dropout=0.0).to('cpu')
     optimizer = torch.optim.Adam(transformer.parameters(), lr=1e-3, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
     scheduler = CustomSchedule(optimizer, d_model=512, warmup_steps=4000)
-    enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(17, 18, 16, False)
-    train_losses = train(transformer, optimizer, scheduler, reverse_train_loader, 2, (enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids))
+    enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(17, 34, 16, False)
+    train_losses = train(transformer, optimizer, scheduler, dup_train_loader, 2, (enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids))
     torch.save(transformer.state_dict(), './transformer_try.pth')
     print(train_losses)
     transformer.load_state_dict(torch.load('./transformer_try.pth', map_location=torch.device('cpu')))
 
-    loss0, accuracy0 = test(transformer, reverse_test_loader0, (enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids))
-    loss1, accuracy1 = test(transformer, reverse_test_loader1, (enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids))
-    enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(25, 26, 16, False)
-    loss2, accuracy2 = test(transformer, reverse_test_loader2, (enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids))
+    loss0, accuracy0 = test(transformer, dup_test_loader0, (enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids))
+    loss1, accuracy1 = test(transformer, dup_test_loader1, (enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids))
+    enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(25, 50, 16, False)
+    loss2, accuracy2 = test(transformer, dup_test_loader2, (enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids))
     loss = np.mean([loss0, loss1, loss2])
     accuracy = np.mean([accuracy0, accuracy1, accuracy2])
 
