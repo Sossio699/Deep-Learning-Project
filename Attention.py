@@ -29,17 +29,17 @@ class MultiHeadAttention(nn.Module):
         self.scale = torch.sqrt(torch.FloatTensor([self.dim_qkv]))
         self.dropout = nn.Dropout(dropout)
     
-    def scaled_dot_product_attention(self, Q, K, V, mask):
+    def scaled_dot_product_attention(self, Q, K, V, mask, device='cuda'):
         # Compute attention scores
-        print(Q.shape)
-        print(K.shape)
-        attention_scores = torch.matmul(Q, K.transpose(-2, -1)) / self.scale
-        print(attention_scores.shape)
+        #print(Q.shape)
+        #print(K.shape)
+        attention_scores = torch.matmul(Q, K.transpose(-2, -1)) / self.scale.to(device)
+        #print(attention_scores.shape)
 
         # Apply mask if provided (useful for preventing attention to certain parts like padding)
         if mask is not None:
-            print(attention_scores.shape)
-            print(f"mask shape: {mask.shape}")
+            #print(attention_scores.shape)
+            #print(f"mask shape: {mask.shape}")
             attention_scores = attention_scores.masked_fill(mask == 0, -1e9)
         
         # Softmax is applied to obtain attention probabilities
@@ -85,12 +85,12 @@ class MultiHeadAttention_relE(MultiHeadAttention):
         self.relative_embeddings = nn.Embedding(self.relative_vocab_size, d_model // num_heads)
         torch.nn.init.uniform_(self.relative_embeddings.weight, -0.05, 0.05) # Embedding layer initialized with U(-0.05, 0.05)
     
-    def scaled_dot_product_attention(self, Q, K, V, relative_ids, mask):
+    def scaled_dot_product_attention(self, Q, K, V, relative_ids, mask, device='cuda'):
         # Compute attention scores
         mat_qk = torch.matmul(Q, K.transpose(-2, -1))
-        rp_k = self.relative_embeddings(relative_ids)
+        rp_k = self.relative_embeddings(relative_ids.to(device))
         mat_qr = torch.einsum("bhqd,qkd->bhqk", Q, rp_k) # Einstein summation
-        attention_scores = (mat_qk + mat_qr) / self.scale # Scaled attention scores with relative positional encoding
+        attention_scores = (mat_qk + mat_qr) / self.scale.to(device) # Scaled attention scores with relative positional encoding
 
         # Apply mask if provided (useful for preventing attention to certain parts like padding)
         if mask is not None:
@@ -125,11 +125,11 @@ class MultiHeadAttention_relB(MultiHeadAttention):
         self.relative_bias = nn.Embedding(self.relative_vocab_size, 1)
         torch.nn.init.uniform_(self.relative_bias.weight, -0.05, 0.05) # Embedding layer initialized with U(-0.05, 0.05)
     
-    def scaled_dot_product_attention(self, Q, K, V, relative_ids, mask):
+    def scaled_dot_product_attention(self, Q, K, V, relative_ids, mask, device='cuda'):
         # Compute attention scores
-        attention_scores = torch.matmul(Q, K.transpose(-2, -1)) / self.scale
+        attention_scores = torch.matmul(Q, K.transpose(-2, -1)) / self.scale.to(device)
 
-        bias = self.relative_bias(relative_ids)
+        bias = self.relative_bias(relative_ids.to(device))
         attention_scores = attention_scores + torch.squeeze(bias, -1)
 
         # Apply mask if provided (useful for preventing attention to certain parts like padding)
@@ -167,18 +167,18 @@ class MultiHeadAttention_relEB(MultiHeadAttention):
         self.relative_bias = nn.Embedding(self.relative_vocab_size, 1)
         torch.nn.init.uniform_(self.relative_bias.weight, -0.05, 0.05) # Embedding layer initialized with U(-0.05, 0.05)
     
-    def scaled_dot_product_attention(self, Q, K, V, relative_ids, mask):
+    def scaled_dot_product_attention(self, Q, K, V, relative_ids, mask, device='cuda'):
         # Compute attention scores
-        print(Q.shape)
-        print(K.shape)
+        #print(Q.shape)
+        #print(K.shape)
         mat_qk = torch.matmul(Q, K.transpose(-2, -1))
-        rp_k = self.relative_embeddings(relative_ids)
-        print(rp_k.shape)
-        print(Q.shape)
+        rp_k = self.relative_embeddings(relative_ids.to(device))
+        #print(rp_k.shape)
+        #print(Q.shape)
         mat_qr = torch.einsum("bhqd,qkd->bhqk", Q, rp_k) # Einstein summation
-        attention_scores = (mat_qk + mat_qr) / self.scale # Scaled attention scores with relative positional encoding
+        attention_scores = (mat_qk + mat_qr) / self.scale.to(device) # Scaled attention scores with relative positional encoding
 
-        bias = self.relative_bias(relative_ids)
+        bias = self.relative_bias(relative_ids.to(device))
         attention_scores = attention_scores + torch.squeeze(bias, -1)
 
         # Apply mask if provided (useful for preventing attention to certain parts like padding)

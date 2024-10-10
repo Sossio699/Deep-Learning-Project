@@ -154,7 +154,7 @@ class ExtendedDecoderLayer(DecoderLayer):
     
     def forward(self, x, enc_output, dec_relative_ids1, dec2enc_relative_ids, src_mask=None, trg_mask=None):
         # Compute self attention
-        print("Decoder self attention")
+        #print("Decoder self attention")
         a_output, _ = self.self_attention(Q=x, K=x, V=x, relative_ids=dec_relative_ids1, mask=trg_mask)
 
         # Add and norm
@@ -256,25 +256,33 @@ class Transformer(nn.Module):
         torch.nn.init.xavier_uniform_(self.fc.weight) # Dense layer initialized with Glorot initializer
         self.dropout = nn.Dropout(dropout)
 
-    def generate_mask(self, src, trg):
-        print(trg.shape)
-        src_mask = (src != 0).unsqueeze(1).unsqueeze(2)
-        trg_mask = (trg != 0).unsqueeze(1).unsqueeze(3)
-        seq_length = trg.size(1)
-        nopeak_mask = (1 - torch.triu(torch.ones(1, seq_length, seq_length), diagonal=1)).bool()
-        print(f"trg_mask: {trg_mask.shape}, nopeak_mask: {nopeak_mask.shape}")
-        trg_mask = trg_mask & nopeak_mask
-        return src_mask, trg_mask
+    def create_padding_mask(self, seq, device='cuda'):
+        # Check where the sequence equals 0 (padding tokens), and cast to float
+        mask = (seq == 0).float()  # Shape: [batch_size, seq_len]
+
+        # Add extra dimensions to match the shape needed for attention mechanisms
+        return mask[:, None, None, :].to(device)  # Shape: [batch_size, 1, 1, seq_len]
+    
+    def create_look_ahead_mask(self, size, device='cuda'):
+        # Create a matrix with ones above the diagonal and zeros on or below the diagonal
+        mask = torch.triu(torch.ones((size, size)), diagonal=1)  # Shape: [size, size]
+        return mask.to(device)  # (seq_len, seq_len)
 
     def forward(self, src, trg):
-        src_mask, trg_mask = self.generate_mask(src, trg)
         src_embedded = self.dropout(self.positional_encoding_enc(self.encoder_embedding(src)))
         tgt_embedded = self.dropout(self.positional_encoding_dec(self.decoder_embedding(trg)))
 
         enc_output = src_embedded
+        src_mask = self.create_padding_mask(src) # Encoder padding mask 
         enc_output = self.encoder(enc_output, src_mask)
 
         dec_output = tgt_embedded
+        src_mask = self.create_padding_mask(src) # Used in the 2nd attention block in the decoder. This padding mask is used to mask the encoder outputs.
+
+        look_ahead_mask = self.create_look_ahead_mask(trg.size(1))
+        dec_trg_padding_mask = self.create_padding_mask(trg)
+        trg_mask = torch.max(look_ahead_mask, dec_trg_padding_mask) # Used in the 1st attention block in the decoder. It is used to pad and mask future tokens in the input received by the decoder.
+        
         dec_output = self.decoder(dec_output, enc_output, src_mask, trg_mask)
         output = torch.softmax(self.fc(dec_output), dim=-1)
 
@@ -288,14 +296,20 @@ class ExtendedTransformer1(Transformer):
         self.decoder = ExtendedDecoder(l, d, h, f, dropout, attention)
     
     def forward(self, src, trg, enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids):
-        src_mask, trg_mask = self.generate_mask(src, trg)
         src_embedded = self.dropout(self.positional_encoding_enc(self.encoder_embedding(src)))
         tgt_embedded = self.dropout(self.positional_encoding_dec(self.decoder_embedding(trg)))
 
         enc_output = src_embedded
+        src_mask = self.create_padding_mask(src) # Encoder padding mask
         enc_output = self.encoder(enc_output, enc_relative_ids, src_mask)
 
         dec_output = tgt_embedded
+        src_mask = self.create_padding_mask(src) # Used in the 2nd attention block in the decoder. This padding mask is used to mask the encoder outputs.
+
+        look_ahead_mask = self.create_look_ahead_mask(trg.size(1))
+        dec_trg_padding_mask = self.create_padding_mask(trg)
+        trg_mask = torch.max(look_ahead_mask, dec_trg_padding_mask) # Used in the 1st attention block in the decoder. It is used to pad and mask future tokens in the input received by the decoder.
+        
         dec_output = self.decoder(dec_output, enc_output, dec_relative_ids1, dec2enc_relative_ids, trg_mask, src_mask)
         output = torch.softmax(self.fc(dec_output), dim=-1)
 
@@ -305,21 +319,21 @@ class ExtendedTransformer1(Transformer):
 class CopyDecoder(nn.Module):
     def __init__(self, d_model, num_heads, dropout):
         super(CopyDecoder, self).__init__()
-        self.attention = Attention.MultiHeadAttention(d_model, num_heads, dropout) # Nel codice non usano quella con RPE
+        self.attention = Attention.MultiHeadAttention(d_model, num_heads, dropout) # Scaled Dot Product Attention
 
         self.fcQ = nn.Linear(d_model, d_model)
         torch.nn.init.xavier_uniform_(self.fcQ.weight) # Dense layer initialized with Glorot initializer
         self.fcw = nn.Linear(d_model, 1)
         torch.nn.init.xavier_uniform_(self.fcw.weight) # Dense layer initialized with Glorot initializer
     
-    # p1 è l'output del Transformer senza il Copy Decoder
+    # p1 is the Transformer output without the Copy Decoder
     def forward(self, src_vocab_size, dec_output, enc_output, src, p1):
         src_one_hot = F.one_hot(src, src_vocab_size)
         src_one_hot = src_one_hot.float()
-        print(src_one_hot.shape)
+        #print(src_one_hot.shape)
 
         copy_query = self.fcQ(dec_output)
-        a_output, _ = self.attention(Q=copy_query, K=enc_output, V=src_one_hot, copy=True) # Nel codice non usano una mask
+        a_output, _ = self.attention(Q=copy_query, K=enc_output, V=src_one_hot, copy=True) # Authors do not use any mask
         p2 = torch.softmax(a_output, dim=-1)
 
         w = torch.sigmoid(self.fcw(dec_output))
@@ -333,14 +347,20 @@ class ExtendedStdTransformer2(Transformer):
         self.copy_decoder = CopyDecoder(d, h, dropout)
 
     def forward(self, src, trg, src_vocab_size):
-        src_mask, trg_mask = self.generate_mask(src, trg)
         src_embedded = self.dropout(self.positional_encoding_enc(self.encoder_embedding(src)))
         tgt_embedded = self.dropout(self.positional_encoding_dec(self.decoder_embedding(trg)))
 
         enc_output = src_embedded
+        src_mask = self.create_padding_mask(src) # Encoder padding mask
         enc_output = self.encoder(enc_output, src_mask)
 
         dec_output = tgt_embedded
+        src_mask = self.create_padding_mask(src) # Used in the 2nd attention block in the decoder. This padding mask is used to mask the encoder outputs.
+
+        look_ahead_mask = self.create_look_ahead_mask(trg.size(1))
+        dec_trg_padding_mask = self.create_padding_mask(trg)
+        trg_mask = torch.max(look_ahead_mask, dec_trg_padding_mask) # Used in the 1st attention block in the decoder. It is used to pad and mask future tokens in the input received by the decoder.
+        
         dec_output = self.decoder(dec_output, enc_output, src_mask, trg_mask)
         output = torch.softmax(self.fc(dec_output), dim=-1)
 
@@ -354,14 +374,20 @@ class ExtendedTransformer2(ExtendedTransformer1):
         self.copy_decoder = CopyDecoder(d, h, dropout)
     
     def forward(self, src, trg, enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids, src_vocab_size):
-        src_mask, trg_mask = self.generate_mask(src, trg)
         src_embedded = self.dropout(self.positional_encoding_enc(self.encoder_embedding(src)))
         trg_embedded = self.dropout(self.positional_encoding_dec(self.decoder_embedding(trg)))
 
         enc_output = src_embedded
+        src_mask = self.create_padding_mask(src) # Encoder padding mask
         enc_output = self.encoder(enc_output, enc_relative_ids, src_mask)
 
         dec_output = trg_embedded
+        src_mask = self.create_padding_mask(src) # Used in the 2nd attention block in the decoder. This padding mask is used to mask the encoder outputs.
+
+        look_ahead_mask = self.create_look_ahead_mask(trg.size(1))
+        dec_trg_padding_mask = self.create_padding_mask(trg)
+        trg_mask = torch.max(look_ahead_mask, dec_trg_padding_mask) # Used in the 1st attention block in the decoder. It is used to pad and mask future tokens in the input received by the decoder.
+        
         dec_output = self.decoder(dec_output, enc_output, dec_relative_ids1, dec2enc_relative_ids, trg_mask, src_mask)
         output = torch.softmax(self.fc(dec_output), dim=-1)
 

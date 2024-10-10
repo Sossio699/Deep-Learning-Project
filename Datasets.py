@@ -129,13 +129,13 @@ def create_addition_dataset(trainsize, testsize, leftpadding=12, negativeProbabi
     test_hard_examples_in_raw, test_hard_examples_out_raw = create_examples(testsize, 9, 10, leftpadding=leftpadding, negativeProbability=negativeProbability)
 
     input_tensor_train, target_tensor_train = create_dataset_tensors(train_examples_in_raw, train_examples_out_raw, vocab_to_int)
-    input_tensor_val0, target_tensor_val0 = create_dataset_tensors(train_examples_in_raw[0:testsize], train_examples_out_raw[0:testsize], vocab_to_int)
-    input_tensor_val1, target_tensor_val1 = create_dataset_tensors(test_easy_examples_in_raw, test_easy_examples_out_raw, vocab_to_int)
-    input_tensor_val2, target_tensor_val2 = create_dataset_tensors(test_examples_in_raw, test_examples_out_raw, vocab_to_int)
+    #input_tensor_val0, target_tensor_val0 = create_dataset_tensors(train_examples_in_raw[0:testsize], train_examples_out_raw[0:testsize], vocab_to_int)
+    #input_tensor_val1, target_tensor_val1 = create_dataset_tensors(test_easy_examples_in_raw, test_easy_examples_out_raw, vocab_to_int)
+    #input_tensor_val2, target_tensor_val2 = create_dataset_tensors(test_examples_in_raw, test_examples_out_raw, vocab_to_int)
     input_tensor_val3, target_tensor_val3 = create_dataset_tensors(test_hard_examples_in_raw, test_hard_examples_out_raw, vocab_to_int)
 
-    input_tensor_val = torch.cat((input_tensor_val0, input_tensor_val1, input_tensor_val2, input_tensor_val3), dim=0)
-    target_tensor_val = torch.cat((target_tensor_val0, target_tensor_val1, target_tensor_val2, target_tensor_val3), dim=0)
+    input_tensor_val = input_tensor_val3 #input_tensor_val = torch.cat((input_tensor_val0, input_tensor_val1, input_tensor_val2, input_tensor_val3), dim=0)
+    target_tensor_val = target_tensor_val3 #target_tensor_val = torch.cat((target_tensor_val0, target_tensor_val1, target_tensor_val2, target_tensor_val3), dim=0)
 
     return (vocab, vocab_to_int, input_tensor_train, target_tensor_train, input_tensor_val, target_tensor_val)
 
