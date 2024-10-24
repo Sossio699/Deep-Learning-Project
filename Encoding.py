@@ -20,7 +20,7 @@ class AbsolutePositionalEncoding(nn.Module):
         # Registered as a buffer -> part of the module's state, but not a trainable parameter
     
     def forward(self, x):
-        return x + self.pe[:, :x.size(1)]
+        return x + self.pe[:, :x.size(1), :]
 
 
 # If cross attention ids are needed (rel2-*), then dec2enc_ids = True
@@ -32,14 +32,14 @@ def create_relative_ids(inp_len, tar_len, max_relative_position, dec2enc_ids):
       diff = max_relative_position + min(max(diff, -max_relative_position), max_relative_position)
       enc_relative_ids[i][j] = diff
 
-  dec_relative_ids1 = np.zeros([tar_len, tar_len], dtype=int) # era tar_len - 1, tar_len - 1
+  dec_relative_ids1 = np.zeros([tar_len - 1, tar_len - 1], dtype=int)
   for i in range(tar_len-1):
     for j in range(tar_len-1):
       diff = i - j
       diff = max_relative_position + min(max(diff, -max_relative_position), max_relative_position)
       dec_relative_ids1[i][j] = diff
 
-  dec2enc_relative_ids = np.zeros([tar_len, inp_len], dtype=int) # era tar_len - 1
+  dec2enc_relative_ids = np.zeros([tar_len - 1, inp_len], dtype=int)
   for i in range(tar_len-1):
     for j in range(inp_len):
       if dec2enc_ids:
