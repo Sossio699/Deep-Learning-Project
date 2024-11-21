@@ -11,9 +11,9 @@ class FeedForward(nn.Module):
     def __init__(self, d_model, hidden):
         super(FeedForward, self).__init__()
         self.linear1 = nn.Linear(d_model, hidden)
-        #torch.nn.init.xavier_uniform_(self.linear1.weight) # Dense layer initialized with Glorot initializer
+        torch.nn.init.xavier_uniform_(self.linear1.weight) # Dense layer initialized with Glorot initializer
         self.linear2 = nn.Linear(hidden, d_model)
-        #torch.nn.init.xavier_uniform_(self.linear2.weight) # Dense layer initialized with Glorot initializer
+        torch.nn.init.xavier_uniform_(self.linear2.weight) # Dense layer initialized with Glorot initializer
         self.relu = nn.ReLU()
 
     def forward(self, x):
@@ -226,9 +226,9 @@ class Transformer(nn.Module):
     def __init__(self, src_vocab_size, trg_vocab_size, d, h, l, f, max_seq_length_enc, max_seq_length_dec):
         super(Transformer, self).__init__()
         self.encoder_embedding = nn.Embedding(src_vocab_size, d)
-        #torch.nn.init.uniform_(self.encoder_embedding.weight, -0.05, 0.05) # Embedding layer initialized with U(-0.05, 0.05)
+        torch.nn.init.uniform_(self.encoder_embedding.weight, -0.05, 0.05) # Embedding layer initialized with U(-0.05, 0.05)
         self.decoder_embedding = nn.Embedding(trg_vocab_size, d)
-        #torch.nn.init.uniform_(self.decoder_embedding.weight, -0.05, 0.05) # Embedding layer initialized with U(-0.05, 0.05)
+        torch.nn.init.uniform_(self.decoder_embedding.weight, -0.05, 0.05) # Embedding layer initialized with U(-0.05, 0.05)
         self.positional_encoding_enc = Encoding.AbsolutePositionalEncoding(d, max_seq_length_enc)
         self.positional_encoding_dec = Encoding.AbsolutePositionalEncoding(d, max_seq_length_dec)
 
@@ -240,7 +240,7 @@ class Transformer(nn.Module):
         self.decoder = Decoder(l, d, h, f)
 
         self.fc = nn.Linear(d, trg_vocab_size)
-        #torch.nn.init.xavier_uniform_(self.fc.weight) # Dense layer initialized with Glorot initializer
+        torch.nn.init.xavier_uniform_(self.fc.weight) # Dense layer initialized with Glorot initializer
 
     def create_padding_mask(self, seq, device='cuda'):
         # Check where the sequence equals 0 (padding tokens), and cast to float
@@ -255,12 +255,12 @@ class Transformer(nn.Module):
         return mask.to(device) 
 
     def forward(self, src, trg, dropout=0.1, training=True):
-        src_embedded = self.encoder_embedding(src) * math.sqrt(self.d)
+        src_embedded = self.encoder_embedding(src)# * math.sqrt(self.d)
         #src_embedded += Encoding.positional_encoding(self.max_seq_length_enc, self.d)[:, :src.shape[1], :].to('cuda')
         src_embedded = self.positional_encoding_enc(src_embedded)
         src_embedded = F.dropout(src_embedded, p=dropout, training=training)
 
-        trg_embedded = self.decoder_embedding(trg) * math.sqrt(self.d)
+        trg_embedded = self.decoder_embedding(trg)# * math.sqrt(self.d)
         #trg_embedded *= torch.sqrt(torch.tensor(self.d, dtype=torch.float32))
         #trg_embedded += Encoding.positional_encoding(self.max_seq_length_dec, self.d)[:, :trg.shape[1], :].to('cuda')
         trg_embedded = self.positional_encoding_dec(trg_embedded)
@@ -273,7 +273,7 @@ class Transformer(nn.Module):
         dec_output = trg_embedded
         src_mask = self.create_padding_mask(src) # Used in the 2nd attention block in the decoder. This padding mask is used to mask the encoder outputs.
 
-        look_ahead_mask = self.create_look_ahead_mask(trg.size(1))
+        look_ahead_mask = self.create_look_ahead_mask(trg.shape[1])
         dec_trg_padding_mask = self.create_padding_mask(trg)
         trg_mask = torch.max(look_ahead_mask, dec_trg_padding_mask) # Used in the 1st attention block in the decoder. It is used to pad and mask future tokens in the input received by the decoder.
 
@@ -281,7 +281,7 @@ class Transformer(nn.Module):
         output = F.softmax(self.fc(dec_output), dim=-1) # (batch_size, target_sequence_length, vocab_size)
 
         return output
-
+    
 
 class ExtendedTransformer1(Transformer):
     def __init__(self, src_vocab_size, trg_vocab_size, d, h, l, f, max_seq_length_enc, max_seq_length_dec, attention="rel-eb"):
@@ -290,12 +290,12 @@ class ExtendedTransformer1(Transformer):
         self.decoder = ExtendedDecoder(l, d, h, f, attention)
     
     def forward(self, src, trg, enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids, dropout=0.1, training=True):
-        src_embedded = self.encoder_embedding(src) * math.sqrt(self.d)
+        src_embedded = self.encoder_embedding(src)# * math.sqrt(self.d)
         #src_embedded += Encoding.positional_encoding(self.max_seq_length_enc, self.d)[:, :src.shape[1], :].to('cuda')
         src_embedded = self.positional_encoding_enc(src_embedded)
         src_embedded = F.dropout(src_embedded, p=dropout, training=training)
 
-        trg_embedded = self.decoder_embedding(trg) * math.sqrt(self.d)
+        trg_embedded = self.decoder_embedding(trg)# * math.sqrt(self.d)
         #trg_embedded *= torch.sqrt(torch.tensor(self.d, dtype=torch.float32))
         #trg_embedded += Encoding.positional_encoding(self.max_seq_length_dec, self.d)[:, :trg.shape[1], :].to('cuda')
         trg_embedded = self.positional_encoding_dec(trg_embedded)
@@ -308,7 +308,7 @@ class ExtendedTransformer1(Transformer):
         dec_output = trg_embedded
         src_mask = self.create_padding_mask(src) # Used in the 2nd attention block in the decoder. This padding mask is used to mask the encoder outputs.
 
-        look_ahead_mask = self.create_look_ahead_mask(trg.size(1))
+        look_ahead_mask = self.create_look_ahead_mask(trg.shape[1])
         dec_trg_padding_mask = self.create_padding_mask(trg)
         trg_mask = torch.max(look_ahead_mask, dec_trg_padding_mask) # Used in the 1st attention block in the decoder. It is used to pad and mask future tokens in the input received by the decoder.
         
@@ -324,9 +324,9 @@ class CopyDecoder(nn.Module):
         self.attention = Attention.MultiHeadAttention(d_model, num_heads) # Scaled Dot Product Attention
 
         self.fcQ = nn.Linear(d_model, d_model)
-        #torch.nn.init.xavier_uniform_(self.fcQ.weight) # Dense layer initialized with Glorot initializer
+        torch.nn.init.xavier_uniform_(self.fcQ.weight) # Dense layer initialized with Glorot initializer
         self.fcw = nn.Linear(d_model, 1)
-        #torch.nn.init.xavier_uniform_(self.fcw.weight) # Dense layer initialized with Glorot initializer
+        torch.nn.init.xavier_uniform_(self.fcw.weight) # Dense layer initialized with Glorot initializer
     
     # p1 is the Transformer output without the Copy Decoder
     def forward(self, src_vocab_size, dec_output, enc_output, src, p1):

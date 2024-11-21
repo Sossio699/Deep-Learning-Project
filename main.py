@@ -22,53 +22,84 @@ def decode_example(example, vocab):
 
 
 # Train and Test functions
-def train(transformer, optimizer, dl_train, epochs, relative_ids=None, src_vocab_size=None, device='cuda'):
+def train_step(transformer, optimizer, dl_train, epoch, criterion, relative_ids=None, src_vocab_size=None, clip=False, device='cuda'):
     transformer.train()
     # Save losses of each epoch
     train_losses = []
-    for epoch in range(epochs):
-        print(f"Training epoch: {epoch}")
-        epoch_losses = []
-        #for (source, target) in tqdm.tqdm(dl_train, desc=f'Training epoch {epoch}', leave=True):
-        for iter, data_train in enumerate(dl_train):
-            source, target = data_train
-            source, target = source.to(device), target.to(device)
-            target_input = target[:, :-1] # remove last element
-            target_real = target[:, 1:] # remove first element
-            optimizer.zero_grad()
+    #for epoch in range(epochs):
+    print(f"Training epoch: {epoch}")
+    epoch_losses = []
+    #for (source, target) in tqdm.tqdm(dl_train, desc=f'Training epoch {epoch}', leave=True):
+    for iter, data_train in enumerate(dl_train):
+        source, target = data_train
+        source, target = source.to(device), target.to(device)
+        target_input = target[:, :-1] # remove last element
+        target_real = target[:, 1:] # remove first element
+        optimizer.zero_grad()
 
-            if src_vocab_size is None and relative_ids is None:
-                predictions = transformer(source, target_input) # Transformer
-            elif src_vocab_size is not None and relative_ids is None:
-                predictions = transformer(source, target_input, src_vocab_size) # ExtendedStdTransformer2
-            elif src_vocab_size is None and relative_ids is not None:
-                predictions = transformer(source, target_input, relative_ids[0], relative_ids[1], relative_ids[2]) # ExtendedTransformer1
-            else:
-                predictions = transformer(source, target_input, relative_ids[0], relative_ids[1], relative_ids[2], src_vocab_size) # ExtendedTransformer2-4
+        if src_vocab_size is None and relative_ids is None:
+            predictions = transformer(source, target_input) # Transformer
+        elif src_vocab_size is not None and relative_ids is None:
+            predictions = transformer(source, target_input, src_vocab_size) # ExtendedStdTransformer2
+        elif src_vocab_size is None and relative_ids is not None:
+            predictions = transformer(source, target_input, relative_ids[0], relative_ids[1], relative_ids[2]) # ExtendedTransformer1
+        else:
+            predictions = transformer(source, target_input, relative_ids[0], relative_ids[1], relative_ids[2], src_vocab_size) # ExtendedTransformer2-4
 
-            #print(f"Predictions: {predictions.shape}, requires_grad: {predictions.requires_grad}")
-            #print(f"Target: {target.shape}, requires_grad: {target.requires_grad}")
-            #loss = F.cross_entropy(predictions, target, ignore_index=0, reduction="mean")
-            predictions = predictions.view(-1, predictions.size(-1)) # (batch_size * target_sequence_length, vocab_size)
-            target_real = target_real.reshape(-1) # (batch_size * target_sequence_length)
-            loss = F.cross_entropy(predictions, target_real, ignore_index=0, reduction="mean") 
+        #print(f"Predictions: {predictions.shape}, requires_grad: {predictions.requires_grad}")
+        #print(f"Target: {target.shape}, requires_grad: {target.requires_grad}")
+        #loss = F.cross_entropy(predictions, target, ignore_index=0, reduction="mean")
+        predictions = predictions.view(-1, predictions.size(-1)) # (batch_size * target_sequence_length, vocab_size)
+        #target_real = target_real.reshape(-1) # (batch_size * target_sequence_length)
+        target_real = target_real.contiguous().view(-1)
+        loss = criterion(predictions, target_real) 
 
-            loss.backward()
-            #optimizer.step()
-            #scheduler.step()
-            optimizer.step_and_update_lr()
-            epoch_losses.append(loss.detach().cpu().numpy())#.item())
-            if (iter) % 500 == 0:
-                print(f"Loss of iter {iter}: {loss.item():.3f}")
-        print(f"Mean epoch loss: {np.mean(epoch_losses)}")
-        train_losses.append(np.mean(epoch_losses))
+        loss.backward()
+        #optimizer.step()
+        #scheduler.step()
+        if clip:
+            torch.nn.utils.clip_grad_norm_(transformer.parameters(), 1)
+        optimizer.step_and_update_lr()
+        epoch_losses.append(loss.detach().cpu().numpy())#.item())
+        if (iter) % 500 == 0:
+            print(f"Loss of iter {iter}: {loss.item():.3f}")
+    print(f"Mean epoch loss: {np.mean(epoch_losses)}")
+    train_losses.append(np.mean(epoch_losses))
     
     return train_losses
 
-def test(transformer, dl_test, relative_ids=None, src_vocab_size=None, device='cuda'):
+
+def sequence_level_accuracy(predictions, target, eos_token_idx=2, greedy=False):
+    if not greedy:
+        predicted_token = torch.argmax(predictions, dim=-1) # (batch_size, seq_len)
+    else:
+        predicted_token = predictions
+    target_list = target.tolist()
+    pred_token_list = predicted_token.tolist()
+
+    total_correct = 0
+    for i in range(len(target_list)): # batch
+        correct = 1
+        for j in range(len(target_list[i])): # element of batch
+            if target_list[i][j] != eos_token_idx:
+                if target_list[i][j] != pred_token_list[i][j]:
+                    correct = 0
+                    break
+            elif target_list[i][j] == pred_token_list[i][j]:
+                break
+            else:
+                correct = 0
+                break
+        total_correct += correct
+    
+    accuracy = total_correct / len(target_list)
+    return accuracy
+
+
+def test(transformer, dl_test, max_trg_len, max_src_len=0, relative_ids=None, src_vocab_size=None, device='cuda'):
     transformer.eval()
-    all_predictions = []
-    all_targets = []
+    sl_accuracies = []
+    sl_accuracies_gd = []
     print("Testing")
     # Disable gradient computation and reduce memory consumption.
     with torch.no_grad():
@@ -82,81 +113,67 @@ def test(transformer, dl_test, relative_ids=None, src_vocab_size=None, device='c
 
             if src_vocab_size is None and relative_ids is None:
                 predictions = transformer(source, target_input, training=False) # Transformer
+                predictions_gd = greedy_decode(transformer, source, max_trg_len, max_src_len, 3, 2)
             elif src_vocab_size is not None and relative_ids is None:
                 predictions = transformer(source, target_input, src_vocab_size, training=False) # ExtendedStdTransformer2
+                predictions_gd = greedy_decode(transformer, source, max_trg_len, max_src_len, 3, 2, src_vocab_size=src_vocab_size)
             elif src_vocab_size is None and relative_ids is not None:
                 predictions = transformer(source, target_input, relative_ids[0], relative_ids[1], relative_ids[2], training=False) # ExtendedTransformer1
+                predictions_gd = greedy_decode(transformer, source, max_trg_len, max_src_len, 3, 2, relative_ids=relative_ids)
             else:
                 predictions = transformer(source, target_input, relative_ids[0], relative_ids[1], relative_ids[2], src_vocab_size, training=False) # ExtendedTransformer2-4
+                predictions_gd = greedy_decode(transformer, source, max_trg_len, max_src_len, 3, 2, relative_ids=relative_ids, src_vocab_size=src_vocab_size)
             
-            predictions = torch.argmax(predictions, dim=-1)
-            #print(f"Prediction: {predictions.tolist()[0]}, Target: {target_real.tolist()[0]}")
-            all_predictions.append(predictions)
-            all_targets.append(target_real)
-
-    # Flatten predictions and targets to a single tensor
-    all_predictions = torch.cat(all_predictions, dim=0)  # (total_batches * batch_size, max_len)
-    all_targets = torch.cat(all_targets, dim=0)  # (total_batches * batch_size, target_sequence_length)
-
-    # Calculate sequence-level accuracy
-    sl_accuracy = sequence_accuracy(all_predictions, all_targets, 0)
-    tl_accuracy = token_accuracy(all_predictions, all_targets, 0)
-    print(f"Sequence Accuracy: {sl_accuracy:.3f}, Token Accuracy: {tl_accuracy:.3f}")
-    #sl_accuracies.append(sl_accuracy.detach().cpu())
-            
-    return sl_accuracy
-
-
-# Greedy Decoding function for inference
-def greedy_decode(model, src, max_len_trg, max_len_src, start_symbol, pad_token, relative_ids=None, src_vocab_size=None, device='cuda'):
-    """
-    Decodes the output sequence greedily.
+            accuracy = sequence_level_accuracy(predictions, target_real)
+            sl_accuracies.append(accuracy)
+            accuracy_gd = sequence_level_accuracy(predictions_gd, target_real, greedy=True)
+            sl_accuracies_gd.append(accuracy_gd)
     
-    Arguments:
-    - model: The trained Transformer model.
-    - src: The input sequence, shape (batch_size, src_sequence_length).
-    - src_mask: The mask for the input sequence, shape (batch_size, 1, 1, src_sequence_length).
-    - max_len: Maximum length for the output sequence.
-    - start_symbol: The token that indicates the start of the target sequence (e.g., `<sos>`).
-    - pad_token: The padding token index.
-    - device: Device (CPU/GPU) to run the model on.
-    
-    Returns:
-    - output_sequence: The generated output sequence, shape (batch_size, max_len).
-    """
+    print(f"Sequence-level accuracy: {np.mean(sl_accuracies)}")
+    print(f"Sequence-level accuracy with Greedy Decoding: {np.mean(sl_accuracies_gd)}")
+    return np.mean(sl_accuracies)
+
+def greedy_decode(transformer, src, max_len_trg, max_len_src, start_symbol, eos_token, relative_ids=None, src_vocab_size=None, device='cuda'):
+    transformer.eval()
     batch_size = src.shape[0]
-    trg = torch.ones(batch_size, max_len_trg).fill_(start_symbol).type(torch.long).to(device)  # Start symbol, shape (batch_size, 1)
+    trg = torch.zeros(batch_size, max_len_trg).fill_(start_symbol).type(torch.long).to(device)
 
-    for i in range(max_len_trg - 1):
-        
-        # Forward pass through the model
-        if src_vocab_size is None and relative_ids is None:
-            output = model(src, trg[:, :i+1], training=False) # Transformer
-        elif src_vocab_size is not None and relative_ids is None:
-            output = model(src, trg[:, :i+1], src_vocab_size, training=False) # ExtendedStdTransformer2
-        elif src_vocab_size is None and relative_ids is not None:
-            enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(max_len_src, i + 2, 16, dec2enc_ids=False)
-            relative_ids = (enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids)
-            output = model(src, trg[:, :i+1], relative_ids[0], relative_ids[1], relative_ids[2], training=False) # ExtendedTransformer1
+    with torch.no_grad():
+        src_embedded = transformer.encoder_embedding(src)
+        src_embedded = transformer.positional_encoding_enc(src_embedded)
+        src_mask = transformer.create_padding_mask(src)
+        if relative_ids is not None:
+            enc_output = transformer.encoder(src_embedded, relative_ids[0], src_mask, training=False)
         else:
-            output = model(src, trg[:, :i+1], relative_ids[0], relative_ids[1], relative_ids[2], src_vocab_size, training=False) # ExtendedTransformer2-4
+            enc_output = transformer.encoder(src_embedded, src_mask, training=False)
+    
+    for i in range(max_len_trg - 1):
+        target = trg[:, :i + 1]
 
-        # Get the token with the highest probability at the last position (greedy decoding)
-        next_token = output[:, -1, :].argmax(dim=-1, keepdim=True)  # shape: (batch_size, 1)
-
-        # Concatenate the predicted token to the target sequence
-        #trg = torch.cat([trg, next_token], dim=1)
-        pred_labels = torch.argmax(output, 2)[1]
-        #output = output.argmax(dim=-1)
-        trg[:, i+1] = pred_labels[-1]
-
-
-        # Break if all sequences generated an <eos> token (optional)
-        if (next_token == pad_token).all():
+        with torch.no_grad():
+            trg_embedded = transformer.decoder_embedding(target)
+            trg_embedded = transformer.positional_encoding_dec(trg_embedded)
+            src_mask = transformer.create_padding_mask(src)
+            look_ahead_mask = transformer.create_look_ahead_mask(target.shape[1])
+            dec_trg_padding_mask = transformer.create_padding_mask(target)
+            trg_mask = torch.max(look_ahead_mask, dec_trg_padding_mask)
+            if relative_ids is not None:
+                relative_ids = Encoding.create_relative_ids(max_len_src, i + 2, 16, False)
+                dec_output = transformer.decoder(trg_embedded, enc_output, relative_ids[1], relative_ids[2], trg_mask, src_mask, training=False)
+            else:
+                dec_output = transformer.decoder(trg_embedded, enc_output, trg_mask, src_mask, training=False)
+            output = F.softmax(transformer.fc(dec_output), dim=-1)
+        
+        next_token = output[:, -1, :].argmax(dim=-1, keepdim=True)
+        trg[:, i + 1] = next_token.squeeze()
+        
+        if (next_token == eos_token).all():
             break
-
+    print(trg[0])
     return trg
+    
 
+'''
 def sequence_accuracy(predictions, targets, pad_token):
     # Ensure predictions and targets are both tensors for comparison
     #if isinstance(predictions, list):
@@ -231,7 +248,7 @@ def test_transformer_with_accuracy(model, dataloader, pad_token, start_symbol, m
 
     print(f"Greedy Decode, Sequence-level Accuracy: {accuracy}, Token Acuracy: {accuracy_t}")
     return accuracy_t
-
+'''
 
 # Datasets and Dataloaders
 class CustomDataset(Dataset):
@@ -247,7 +264,10 @@ class CustomDataset(Dataset):
 
 
 random.seed(111)
+np.random.seed(111)
 torch.manual_seed(111)
+seeds = [111, 222, 1111, 2222, 11111]
+
 '''
 # Add dataset
 print("Add Dataset")
@@ -256,7 +276,7 @@ add_dataset_train = CustomDataset(input_tensor_train, target_tensor_train)
 add_dataset_test = CustomDataset(input_tensor_val_list, target_tensor_val_list)
 
 add_train_loader = DataLoader(add_dataset_train, batch_size=64, shuffle=True)
-add_test_loader = DataLoader(add_dataset_test, batch_size=1024, shuffle=False)
+add_test_loader = DataLoader(add_dataset_test, batch_size=64, shuffle=False)
 
 example_train = add_dataset_train.__getitem__(3)
 print(f"Add train example from tokens: input {decode_example(example_train[0], add_vocab)}, output {decode_example(example_train[1], add_vocab)}")
@@ -413,45 +433,40 @@ class TransformerLRScheduler(torch.optim.lr_scheduler.LambdaLR):
         return (self.d_model ** -0.5) * min(arg1, arg2)
 '''
 class ScheduledOptim():
-
-    def __init__(self, optimizer, d_model, n_warmup_steps):
+    def __init__(self, optimizer, lr_mul, d_model, n_warmup_steps):
         self._optimizer = optimizer
+        self.lr_mul = lr_mul
         self.d_model = d_model
         self.n_warmup_steps = n_warmup_steps
         self.n_steps = 0
-
 
     def step_and_update_lr(self):
         "Step with the inner optimizer"
         self._update_learning_rate()
         self._optimizer.step()
 
-
     def zero_grad(self):
         "Zero out the gradients with the inner optimizer"
         self._optimizer.zero_grad()
-
 
     def _get_lr_scale(self):
         d_model = self.d_model
         n_steps, n_warmup_steps = self.n_steps, self.n_warmup_steps
         return (d_model ** (-0.5)) * min(n_steps ** (-0.5), n_steps * (n_warmup_steps ** (-1.5)))
 
-
     def _update_learning_rate(self):
-
         self.n_steps += 1
-        lr = self._get_lr_scale()
-
+        lr = self.lr_mul * self._get_lr_scale()
         for param_group in self._optimizer.param_groups:
             param_group['lr'] = lr
 
 
 # Utility function to get results
-def get_results_Table1(vocab, max_len_enc, max_len_dec, max_len_train_enc, max_len_train_dec, epochs, train_loader,
+def get_results_Table1(vocab, max_len_enc, max_len_dec, epochs, train_loader,
                        test_loader, test_loader1=None, test_loader2=None, repetitions=1, device='cuda'):
     accuracies_rep = []
-    for _ in range(repetitions):
+    for i in range(repetitions):
+        torch.manual_seed(seeds[i])
         accuracies = []
 
         transformer_abs = Transformer.Transformer(len(vocab), len(vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=max_len_enc,
@@ -472,59 +487,52 @@ def get_results_Table1(vocab, max_len_enc, max_len_dec, max_len_train_enc, max_l
         transformers_rel = [transformer_relE, transformer_relB, transformer_relEB]
         transformers_rel2 = [transformer_rel2E, transformer_rel2B, transformer_rel2EB]
 
-        optimizer = ScheduledOptim(torch.optim.Adam(transformer_abs.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9), 64, 4000)
-        train_losses = train(transformer_abs, optimizer, train_loader, epochs=epochs, device=device)
-        accuracy = test_transformer_with_accuracy(transformer_abs, test_loader, 0, 3, max_len_train_dec, max_len_train_enc, device=device)
-        accuracy = test(transformer_abs, test_loader, device=device)
-        if test_loader1 is not None and test_loader2 is not None:
-            accuracy1 = test_transformer_with_accuracy(transformer_abs, test_loader1, 0, 3, max_len_train_dec, max_len_train_enc, device=device)
-            accuracy2 = test_transformer_with_accuracy(transformer_abs, test_loader2, 0, 3, max_len_dec, max_len_enc, device=device)
-            accuracy1 = test(transformer_abs, test_loader1, device=device)
-            accuracy2 = test(transformer_abs, test_loader2, device=device)
-            accuracy = np.mean([accuracy, accuracy1, accuracy2])
-        accuracies.append(accuracy)
+        optimizer = ScheduledOptim(torch.optim.Adam(transformer_abs.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9),1,  64, 4000)
+        criterion = torch.nn.CrossEntropyLoss(ignore_index=0)
+        acc_1 = []
+        for epoch in range (epochs):
+            train_losses = train_step(transformer_abs, optimizer, train_loader, epoch=epoch, criterion=criterion, device=device)
+            accuracy = test(transformer_abs, test_loader, max_len_dec, max_len_enc, device=device)
+            if test_loader1 is not None and test_loader2 is not None:
+                accuracy1 = test(transformer_abs, test_loader1, max_len_dec, max_len_enc, device=device)
+                accuracy2 = test(transformer_abs, test_loader2, max_len_dec, max_len_enc, device=device)
+                accuracy = accuracy2 #np.mean([accuracy, accuracy1, accuracy2])
+            acc_1.append(accuracy)
+        accuracies.append(np.mean(acc_1))
         
+        acc_2 = []
         for transformer in transformers_rel:
-            optimizer = ScheduledOptim(torch.optim.Adam(transformer.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9), 64, 4000)
-            enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(max_len_train_enc, max_len_train_dec,
+            optimizer = ScheduledOptim(torch.optim.Adam(transformer.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9), 1, 64, 4000)
+            criterion = torch.nn.CrossEntropyLoss(ignore_index=0)
+            enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(max_len_enc, max_len_dec,
                                                                                                     16, dec2enc_ids=False)
-            train_losses = train(transformer, optimizer, train_loader,
-                                relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), epochs=epochs, device=device)
-            accuracy = test_transformer_with_accuracy(transformer, test_loader, 0, 3, max_len_train_dec, max_len_train_enc,
-                                                    relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
-            accuracy = test(transformer, test_loader, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
-            if test_loader1 is not None and test_loader2 is not None:
-                accuracy1 = test_transformer_with_accuracy(transformer, test_loader1, 0, 3, max_len_train_dec, max_len_train_enc,
-                                                        relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
-                accuracy1 = test(transformer, test_loader1, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
-                enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(max_len_enc, max_len_dec,
-                                                                                                        16, dec2enc_ids=False)
-                accuracy2 = test_transformer_with_accuracy(transformer, test_loader2, 0, 3, max_len_dec, max_len_enc,
-                                                        relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
-                accuracy2 = test(transformer, test_loader2, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
-                accuracy = np.mean([accuracy, accuracy1, accuracy2])
-            accuracies.append(accuracy)
-        
+            for epoch in range(epochs):
+                train_losses = train_step(transformer, optimizer, train_loader,
+                                    relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), epoch=epoch, criterion=criterion, device=device)
+                accuracy = test(transformer, test_loader, max_len_dec, max_len_enc, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
+                if test_loader1 is not None and test_loader2 is not None:
+                    accuracy1 = test(transformer, test_loader1, max_len_dec, max_len_enc, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
+                    accuracy2 = test(transformer, test_loader2, max_len_dec, max_len_enc, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
+                    accuracy = accuracy2 #np.mean([accuracy, accuracy1, accuracy2])
+                acc_2.append(accuracy)
+            accuracies.append(np.mean(acc_2))
+
+        acc_3 = []
         for transformer in transformers_rel2:
-            optimizer = ScheduledOptim(torch.optim.Adam(transformer.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9), 64, 4000)
-            enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(max_len_train_enc, max_len_train_dec,
+            optimizer = ScheduledOptim(torch.optim.Adam(transformer.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9), 1, 64, 4000)
+            criterion = torch.nn.CrossEntropyLoss(ignore_index=0)
+            enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(max_len_enc, max_len_dec,
                                                                                                     16, dec2enc_ids=True)
-            train_losses = train(transformer, optimizer, train_loader,
-                                relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), epochs=epochs, device=device)
-            accuracy = test_transformer_with_accuracy(transformer, test_loader, 0, 3, max_len_train_dec, max_len_train_enc,
-                                                    relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
-            accuracy = test(transformer, test_loader, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids) ,device=device)
-            if test_loader1 is not None and test_loader2 is not None:
-                accuracy1 = test_transformer_with_accuracy(transformer, test_loader1, 0, 3, max_len_train_dec, max_len_train_enc,
-                                                        relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
-                accuracy1 = test(transformer, test_loader1, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
-                enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(max_len_enc, max_len_dec,
-                                                                                                        16, dec2enc_ids=True)
-                accuracy2 = test_transformer_with_accuracy(transformer, test_loader2, 0, 3, max_len_dec, max_len_enc,
-                                                        relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
-                accuracy2 = test(transformer, test_loader2, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
-                accuracy = np.mean([accuracy, accuracy1, accuracy2])
-            accuracies.append(accuracy)
+            for epoch in range(epochs):
+                train_losses = train_step(transformer, optimizer, train_loader,
+                                    relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), epoch=epoch, criterion=criterion, device=device)
+                accuracy = test(transformer, test_loader, max_len_dec, max_len_enc, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids) ,device=device)
+                if test_loader1 is not None and test_loader2 is not None:
+                    accuracy1 = test(transformer, test_loader1, max_len_dec, max_len_enc, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
+                    accuracy2 = test(transformer, test_loader2, max_len_dec, max_len_enc, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
+                    accuracy = accuracy2 #np.mean([accuracy, accuracy1, accuracy2])
+                acc_3.append(accuracy)
+            accuracies.append(np.mean(acc_3))
         
         accuracies_rep.append(accuracies)
         
@@ -533,30 +541,30 @@ def get_results_Table1(vocab, max_len_enc, max_len_dec, max_len_train_enc, max_l
         for j in range(7):
             accuracies_sum[j] += accuracies_rep[i][j]
 
-    accuracies_mean = [x // repetitions for x in accuracies_sum]
+    accuracies_mean = [x / repetitions for x in accuracies_sum]
 
     return accuracies_mean
-
+    
 
 # Table 1
 def table1(device):
     '''
     # Add dataset
-    accuracies_add = get_results_Table1(add_vocab, 26, 14, 26, 14, 2, add_train_loader, add_test_loader, repetitions=1, device=device)
+    accuracies_add = get_results_Table1(add_vocab, 26, 14, 2, add_train_loader, add_test_loader, repetitions=5, device=device)
     
     # AddNeg dataset
-    accuracies_addNeg = get_results_Table1(addNeg_vocab, 26, 14, 26, 14, 10, addNeg_train_loader, addNeg_test_loader, repetitions=5, device=device)
+    accuracies_addNeg = get_results_Table1(addNeg_vocab, 26, 14, 10, addNeg_train_loader, addNeg_test_loader, repetitions=5, device=device)
     '''
     # Reverse dataset
-    accuracies_reverse = get_results_Table1(reverse_vocab, 25, 26, 17, 18, 2, reverse_train_loader, reverse_test_loader0,
+    accuracies_reverse = get_results_Table1(reverse_vocab, 25, 26, 2, reverse_train_loader, reverse_test_loader0,
                                             reverse_test_loader1, reverse_test_loader2, repetitions=5, device=device)
     '''
     # Dup dataset
-    accuracies_dup = get_results_Table1(dup_vocab, 25, 50, 17, 34, 4, dup_train_loader, dup_test_loader0, dup_test_loader1,
-                                        dup_test_loader2, repetitions=5, deivce=device)
-    
-    #TODO SCAN-I, SCAN-aj, PCFG-p, PCFG-s datasets
+    accuracies_dup = get_results_Table1(dup_vocab, 25, 50, 4, dup_train_loader, dup_test_loader0, dup_test_loader1,
+                                        dup_test_loader2, repetitions=5, device=device)
     '''
+    #TODO SCAN-I, SCAN-aj, PCFG-p, PCFG-s datasets
+
     accuracies_addNeg = [0] * 7
     accuracies_add = [0] * 7
     accuracies_dup = [0] * 7

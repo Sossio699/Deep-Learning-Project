@@ -18,21 +18,20 @@ class MultiHeadAttention(nn.Module):
 
         # Linear layers for transforming inputs
         self.w_q = nn.Linear(d_model, d_model) # Query
-        #torch.nn.init.xavier_uniform_(self.w_q.weight) # Dense layer initialized with Glorot initializer
+        torch.nn.init.xavier_uniform_(self.w_q.weight) # Dense layer initialized with Glorot initializer
         self.w_k = nn.Linear(d_model, d_model) # Key
-        #torch.nn.init.xavier_uniform_(self.w_k.weight) # Dense layer initialized with Glorot initializer
+        torch.nn.init.xavier_uniform_(self.w_k.weight) # Dense layer initialized with Glorot initializer
         self.w_v = nn.Linear(d_model, d_model) # Value
-        #torch.nn.init.xavier_uniform_(self.w_v.weight) # Dense layer initialized with Glorot initializer
+        torch.nn.init.xavier_uniform_(self.w_v.weight) # Dense layer initialized with Glorot initializer
         self.w_o = nn.Linear(d_model, d_model) # Output
-        #torch.nn.init.xavier_uniform_(self.w_o.weight) # Dense layer initialized with Glorot initializer
+        torch.nn.init.xavier_uniform_(self.w_o.weight) # Dense layer initialized with Glorot initializer
 
         #self.scale = torch.sqrt(torch.FloatTensor([self.dim_qkv]))
     
     def scaled_dot_product_attention(self, Q, K, V, mask, device='cuda'):
         # Compute attention scores
-        #print(Q.shape)
-        #print(K.shape)
-        attention_scores = torch.matmul(Q, K.transpose(-2, -1))
+        attention_scores = torch.matmul(Q, K.transpose(-2, -1)) # (batch_size, num_heads, seq_len_q, seq_len_k)
+        #print(attention_scores.shape) 
         dk = K.size(-1)
         attention_scores = attention_scores / torch.sqrt(torch.tensor(dk, dtype=torch.float32))
 
@@ -46,10 +45,11 @@ class MultiHeadAttention(nn.Module):
             attention_scores += (mask * 1e-9)
         
         # Softmax is applied to obtain attention probabilities
-        attention_probabilities = F.softmax(attention_scores, dim=-1)
+        attention_probabilities = F.softmax(attention_scores, dim=-1) # (batch_size, num_heads, seq_len_q, seq_len_k)
 
         # Multiply by values to obtain the final output
-        output = torch.matmul(attention_probabilities, V)
+        output = torch.matmul(attention_probabilities, V) # (batch_size, num_heads, seq_len_q, dim_qkv)
+        #print(output.shape)
         return output, attention_scores
 
     def split_heads(self, x):
@@ -66,16 +66,16 @@ class MultiHeadAttention(nn.Module):
         # If copy is True performs only Scaled dot-product Attention
         if not copy:
             # Apply linear transformations and split heads
-            Q = self.split_heads(self.w_q(Q))
-            K = self.split_heads(self.w_k(K))
-            V = self.split_heads(self.w_v(V))
+            Q = self.split_heads(self.w_q(Q)) # (batch_size, num_heads, seq_len, dim_qkv)
+            K = self.split_heads(self.w_k(K)) # (batch_size, num_heads, seq_len, dim_qkv)
+            V = self.split_heads(self.w_v(V)) # (batch_size, num_heads, seq_len, dim_qkv)
 
         #Perform scaled dot-product attention
         attention_output, attention_scores = self.scaled_dot_product_attention(Q, K, V, mask)
 
         # Combine heads and apply output transformation
         if not copy:
-            output = self.w_o(self.combine_heads(attention_output))
+            output = self.w_o(self.combine_heads(attention_output)) # (batch_size, seq_len, d_model)
         else:
             output = attention_output
         return output, attention_scores
@@ -87,16 +87,16 @@ class MultiHeadAttention_relE(MultiHeadAttention):
         self.max_relative_position = 16 # As indicated in the paper
         self.relative_vocab_size = self.max_relative_position * 2 + 1
         self.relative_embeddings = nn.Embedding(self.relative_vocab_size, self.dim_qkv)
-        #torch.nn.init.uniform_(self.relative_embeddings.weight, -0.05, 0.05) # Embedding layer initialized with U(-0.05, 0.05)
+        torch.nn.init.uniform_(self.relative_embeddings.weight, -0.05, 0.05) # Embedding layer initialized with U(-0.05, 0.05)
     
     def scaled_dot_product_attention(self, Q, K, V, relative_ids, mask, device='cuda'):
-        #print(Q.shape)
+        #print(f"Q: {Q.shape}")
         #print(K.shape)
         # Compute attention scores
         mat_qk = torch.matmul(Q, K.transpose(-2, -1))
         #print(mat_qk.shape)
         rp_k = self.relative_embeddings(relative_ids.to(device))
-        #print(rp_k.shape)
+        #print(f"RP: {rp_k.shape}")
         mat_qr = torch.einsum("bhqd,qkd->bhqk", Q, rp_k) # Einstein summation
         #print(mat_qr.shape)
         attention_scores = (mat_qk + mat_qr)  # Attention scores with relative positional encoding
@@ -138,7 +138,7 @@ class MultiHeadAttention_relB(MultiHeadAttention):
         self.max_relative_position = 16 # As indicated in the paper
         self.relative_vocab_size = self.max_relative_position * 2 + 1
         self.relative_bias = nn.Embedding(self.relative_vocab_size, 1)
-        #torch.nn.init.uniform_(self.relative_bias.weight, -0.05, 0.05) # Embedding layer initialized with U(-0.05, 0.05)
+        torch.nn.init.uniform_(self.relative_bias.weight, -0.05, 0.05) # Embedding layer initialized with U(-0.05, 0.05)
     
     def scaled_dot_product_attention(self, Q, K, V, relative_ids, mask, device='cuda'):
         # Compute attention scores
@@ -181,9 +181,9 @@ class MultiHeadAttention_relEB(MultiHeadAttention):
         self.max_relative_position = 16 # As indicated in the paper
         self.relative_vocab_size = self.max_relative_position * 2 + 1
         self.relative_embeddings = nn.Embedding(self.relative_vocab_size, self.dim_qkv)
-        #torch.nn.init.uniform_(self.relative_embeddings.weight, -0.05, 0.05) # Embedding layer initialized with U(-0.05, 0.05)
+        torch.nn.init.uniform_(self.relative_embeddings.weight, -0.05, 0.05) # Embedding layer initialized with U(-0.05, 0.05)
         self.relative_bias = nn.Embedding(self.relative_vocab_size, 1)
-        #torch.nn.init.uniform_(self.relative_bias.weight, -0.05, 0.05) # Embedding layer initialized with U(-0.05, 0.05)
+        torch.nn.init.uniform_(self.relative_bias.weight, -0.05, 0.05) # Embedding layer initialized with U(-0.05, 0.05)
     
     def scaled_dot_product_attention(self, Q, K, V, relative_ids, mask, device='cuda'):
         # Compute attention scores

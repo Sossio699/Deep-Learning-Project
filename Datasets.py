@@ -2,6 +2,7 @@
 import random
 import torch
 import torch.nn.utils.rnn as rnn_utils
+import torch.nn.functional as F
 
 # Function to visualize examples better
 def decode_example(example):
@@ -28,7 +29,7 @@ def max_length(tensor):
     return max(len(t) for t in tensor)
 
 # Translates a dataset to padded token ID tensors
-def create_dataset_tensors(examples_in_raw, examples_out_raw, vocab_to_int):
+def create_dataset_tensors(examples_in_raw, examples_out_raw, max_len_in, max_len_out, vocab_to_int):
     in_list = []
     for example in examples_in_raw:
         list = [vocab_to_int[x] for x in example]
@@ -39,14 +40,22 @@ def create_dataset_tensors(examples_in_raw, examples_out_raw, vocab_to_int):
         list = [vocab_to_int[x] for x in example]
         tensor = torch.as_tensor(list)
         out_list.append(tensor)
-        
-    #in_tensor = torch.cat(in_list, dim=0)
-    #out_tensor = torch.cat(out_list, dim=0)
-    in_tensor = rnn_utils.pad_sequence(in_list, batch_first=True)
-    out_tensor = rnn_utils.pad_sequence(out_list, batch_first=True)
 
-    print(in_tensor.shape)
-    print(out_tensor.shape)
+    in_tensors = []
+    out_tensors = []
+    for tensor in in_list:
+        pad_tensor = F.pad(tensor, (0, max_len_in - tensor.shape[-1]), "constant", 0)
+        in_tensors.append(pad_tensor)
+    for tensor in out_list:
+        pad_tensor = F.pad(tensor, (0, max_len_out - tensor.shape[-1]), "constant", 0)
+        out_tensors.append(pad_tensor)
+    in_tensor = torch.stack(in_tensors, dim=0)
+    out_tensor = torch.stack(out_tensors, dim=0)
+    #in_tensor = rnn_utils.pad_sequence(in_list, batch_first=True)
+    #out_tensor = rnn_utils.pad_sequence(out_list, batch_first=True)
+
+    print(f"In tensor shape: {in_tensor.shape}")
+    print(f"Out tensor shape: {out_tensor.shape}")
 
     return in_tensor, out_tensor
 
@@ -139,16 +148,16 @@ def create_addition_dataset(trainsize, testsize, leftpadding=12, negativeProbabi
     test_examples_in_raw, test_examples_out_raw = create_examples(testsize, 6, 8, leftpadding=leftpadding, negativeProbability=negativeProbability)
     test_hard_examples_in_raw, test_hard_examples_out_raw = create_examples(testsize, 9, 10, leftpadding=leftpadding, negativeProbability=negativeProbability)
 
-    input_tensor_train, target_tensor_train = create_dataset_tensors(train_examples_in_raw, train_examples_out_raw, vocab_to_int)
-    input_tensor_val0, target_tensor_val0 = create_dataset_tensors(train_examples_in_raw[0:testsize], train_examples_out_raw[0:testsize], vocab_to_int)
-    input_tensor_val1, target_tensor_val1 = create_dataset_tensors(test_easy_examples_in_raw, test_easy_examples_out_raw, vocab_to_int)
-    input_tensor_val2, target_tensor_val2 = create_dataset_tensors(test_examples_in_raw, test_examples_out_raw, vocab_to_int)
-    input_tensor_val3, target_tensor_val3 = create_dataset_tensors(test_hard_examples_in_raw, test_hard_examples_out_raw, vocab_to_int)
+    input_tensor_train, target_tensor_train = create_dataset_tensors(train_examples_in_raw, train_examples_out_raw, 26, 14, vocab_to_int)
+    input_tensor_val0, target_tensor_val0 = create_dataset_tensors(train_examples_in_raw[0:testsize], train_examples_out_raw[0:testsize], 26, 14, vocab_to_int)
+    input_tensor_val1, target_tensor_val1 = create_dataset_tensors(test_easy_examples_in_raw, test_easy_examples_out_raw, 26, 14, vocab_to_int)
+    input_tensor_val2, target_tensor_val2 = create_dataset_tensors(test_examples_in_raw, test_examples_out_raw, 26, 14, vocab_to_int)
+    input_tensor_val3, target_tensor_val3 = create_dataset_tensors(test_hard_examples_in_raw, test_hard_examples_out_raw, 26, 14, vocab_to_int)
 
     input_tensor_val = torch.cat((input_tensor_val0, input_tensor_val1, input_tensor_val2, input_tensor_val3), dim=0)
     target_tensor_val = torch.cat((target_tensor_val0, target_tensor_val1, target_tensor_val2, target_tensor_val3), dim=0)
 
-    return (vocab, vocab_to_int, input_tensor_train, target_tensor_train, input_tensor_val, target_tensor_val)
+    return (vocab, vocab_to_int, input_tensor_train, target_tensor_train, input_tensor_val3, target_tensor_val3) # Only hardest test examples
 
 
 # Reversing dataset
@@ -185,10 +194,10 @@ def create_reversing_dataset(trainsize, testsize, trainmindigits=1, trainmaxdigi
     test_easy_examples_in_raw, test_easy_examples_out_raw = create_examples(testsize, trainmindigits, trainmaxdigits)
     test_hard_examples_in_raw, test_hard_examples_out_raw = create_examples(testsize, testmindigits, testmaxdigits)
 
-    input_tensor_train, target_tensor_train = create_dataset_tensors(train_examples_in_raw, train_examples_out_raw, vocab_to_int)
-    input_tensor_val0, target_tensor_val0 = create_dataset_tensors(train_examples_in_raw[0:testsize], train_examples_out_raw[0:testsize], vocab_to_int)
-    input_tensor_val1, target_tensor_val1 = create_dataset_tensors(test_easy_examples_in_raw, test_easy_examples_out_raw, vocab_to_int)
-    input_tensor_val2, target_tensor_val2 = create_dataset_tensors(test_hard_examples_in_raw, test_hard_examples_out_raw, vocab_to_int)
+    input_tensor_train, target_tensor_train = create_dataset_tensors(train_examples_in_raw, train_examples_out_raw, testmaxdigits + 1, testmaxdigits + 2, vocab_to_int)
+    input_tensor_val0, target_tensor_val0 = create_dataset_tensors(train_examples_in_raw[0:testsize], train_examples_out_raw[0:testsize], testmaxdigits + 1, testmaxdigits + 2, vocab_to_int)
+    input_tensor_val1, target_tensor_val1 = create_dataset_tensors(test_easy_examples_in_raw, test_easy_examples_out_raw, testmaxdigits + 1, testmaxdigits + 2, vocab_to_int)
+    input_tensor_val2, target_tensor_val2 = create_dataset_tensors(test_hard_examples_in_raw, test_hard_examples_out_raw, testmaxdigits + 1, testmaxdigits + 2, vocab_to_int)
 
     input_tensor_val_list = [input_tensor_val0, input_tensor_val1, input_tensor_val2]
     target_tensor_val_list = [target_tensor_val0, target_tensor_val1, target_tensor_val2]
