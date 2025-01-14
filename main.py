@@ -1,11 +1,9 @@
-#Imports
 import sys
 import random
 import numpy as np
 import torch
 import os
 from torch.nn import functional as F
-from torch.optim.lr_scheduler import _LRScheduler
 from torch.utils.data import Dataset, DataLoader
 import pandas as pd
 import Datasets
@@ -24,12 +22,9 @@ def decode_example(example, vocab):
 # Train and Test functions
 def train_step(transformer, optimizer, dl_train, epoch, criterion, relative_ids=None, src_vocab_size=None, clip=False, device='cuda'):
     transformer.train()
-    # Save losses of each epoch
-    train_losses = []
-    #for epoch in range(epochs):
-    print(f"Training epoch: {epoch}")
+    print(f"Training epoch: {epoch + 1}")
     epoch_losses = []
-    #for (source, target) in tqdm.tqdm(dl_train, desc=f'Training epoch {epoch}', leave=True):
+
     for iter, data_train in enumerate(dl_train):
         source, target = data_train
         source, target = source.to(device), target.to(device)
@@ -40,40 +35,50 @@ def train_step(transformer, optimizer, dl_train, epoch, criterion, relative_ids=
         if src_vocab_size is None and relative_ids is None:
             predictions = transformer(source, target_input) # Transformer
         elif src_vocab_size is not None and relative_ids is None:
-            predictions = transformer(source, target_input, src_vocab_size) # ExtendedStdTransformer2
+            predictions = torch.log(transformer(source, target_input, src_vocab_size)) # ExtendedStdTransformer2
         elif src_vocab_size is None and relative_ids is not None:
             predictions = transformer(source, target_input, relative_ids[0], relative_ids[1], relative_ids[2]) # ExtendedTransformer1
         else:
-            predictions = transformer(source, target_input, relative_ids[0], relative_ids[1], relative_ids[2], src_vocab_size) # ExtendedTransformer2-4
+            predictions = torch.log(transformer(source, target_input, relative_ids[0], relative_ids[1], relative_ids[2], src_vocab_size)) # ExtendedTransformer2-4
 
         #print(f"Predictions: {predictions.shape}, requires_grad: {predictions.requires_grad}")
         #print(f"Target: {target.shape}, requires_grad: {target.requires_grad}")
         #loss = F.cross_entropy(predictions, target, ignore_index=0, reduction="mean")
-        predictions = predictions.view(-1, predictions.size(-1)) # (batch_size * target_sequence_length, vocab_size)
+        #predictions = predictions.view(-1, predictions.size(-1)) # (batch_size * target_sequence_length, vocab_size)
+        predictions_reshape = predictions.contiguous().view(-1, predictions.shape[-1])
         #target_real = target_real.reshape(-1) # (batch_size * target_sequence_length)
-        target_real = target_real.contiguous().view(-1)
-        loss = criterion(predictions, target_real) 
+        target_real_reshape = target_real.contiguous().view(-1) # (batch_size * target_sequence_length)
+        loss = criterion(predictions_reshape, target_real_reshape) 
 
         loss.backward()
-        #optimizer.step()
-        #scheduler.step()
         if clip:
-            torch.nn.utils.clip_grad_norm_(transformer.parameters(), 1)
+            torch.nn.utils.clip_grad_norm_(transformer.parameters(), max_norm=1.0)
         optimizer.step_and_update_lr()
-        epoch_losses.append(loss.detach().cpu().numpy())#.item())
+        epoch_losses.append(loss.detach().cpu().numpy())
         if (iter) % 500 == 0:
-            print(f"Loss of iter {iter}: {loss.item():.3f}")
+            print(f"Iter {iter}, Loss: {loss.item():.6f}")
+            print(f"Mean loss: {np.mean(epoch_losses)}")
     print(f"Mean epoch loss: {np.mean(epoch_losses)}")
-    train_losses.append(np.mean(epoch_losses))
     
-    return train_losses
+    return np.mean(epoch_losses)
 
 
-def sequence_level_accuracy(predictions, target, eos_token_idx=2, greedy=False):
-    if not greedy:
-        predicted_token = torch.argmax(predictions, dim=-1) # (batch_size, seq_len)
-    else:
-        predicted_token = predictions
+def sequence_level_accuracy(predictions, targets, pad_token_idx=0):
+    predicted_tokens = torch.argmax(predictions, dim=-1)
+    # Ignore padded tokens in both predictions and targets
+    pred_no_pad = predicted_tokens.masked_fill(targets == pad_token_idx, pad_token_idx)
+    targets_no_pad = targets.masked_fill(targets == pad_token_idx, pad_token_idx)
+
+    # Compare entire sequences (exact match per sequence)
+    match = torch.all(pred_no_pad == targets_no_pad, dim=1)
+
+    # Compute accuracy (proportion of exact matches)
+    accuracy = match.float().mean().item()
+    return accuracy
+
+'''
+def sequence_level_accuracy2(predictions, target, eos_token_idx=2):
+    predicted_token = torch.argmax(predictions, dim=-1) # (batch_size, seq_len)
     target_list = target.tolist()
     pred_token_list = predicted_token.tolist()
 
@@ -90,17 +95,17 @@ def sequence_level_accuracy(predictions, target, eos_token_idx=2, greedy=False):
             else:
                 correct = 0
                 break
+        #if correct:
+            #print(f"Target: {target_list[i]}, Predicted: {pred_token_list[i]}")
         total_correct += correct
     
     accuracy = total_correct / len(target_list)
     return accuracy
+'''
 
-
-def test(transformer, dl_test, max_trg_len, max_src_len=0, relative_ids=None, src_vocab_size=None, device='cuda'):
+def test(transformer, dl_test, relative_ids=None, src_vocab_size=None, device='cuda'):
     transformer.eval()
     sl_accuracies = []
-    sl_accuracies_gd = []
-    print("Testing")
     # Disable gradient computation and reduce memory consumption.
     with torch.no_grad():
         for data_test in dl_test:
@@ -112,171 +117,65 @@ def test(transformer, dl_test, max_trg_len, max_src_len=0, relative_ids=None, sr
             target_real = target[:, 1:]
 
             if src_vocab_size is None and relative_ids is None:
-                predictions = transformer(source, target_input, training=False) # Transformer
-                predictions_gd = greedy_decode(transformer, source, max_trg_len, max_src_len, 3, 2)
+                predictions = F.softmax(transformer(source, target_input), dim=-1) # Transformer
             elif src_vocab_size is not None and relative_ids is None:
-                predictions = transformer(source, target_input, src_vocab_size, training=False) # ExtendedStdTransformer2
-                predictions_gd = greedy_decode(transformer, source, max_trg_len, max_src_len, 3, 2, src_vocab_size=src_vocab_size)
+                predictions = transformer(source, target_input, src_vocab_size) # ExtendedStdTransformer2
             elif src_vocab_size is None and relative_ids is not None:
-                predictions = transformer(source, target_input, relative_ids[0], relative_ids[1], relative_ids[2], training=False) # ExtendedTransformer1
-                predictions_gd = greedy_decode(transformer, source, max_trg_len, max_src_len, 3, 2, relative_ids=relative_ids)
+                predictions = F.softmax(transformer(source, target_input, relative_ids[0], relative_ids[1], relative_ids[2]), dim=-1) # ExtendedTransformer1
             else:
-                predictions = transformer(source, target_input, relative_ids[0], relative_ids[1], relative_ids[2], src_vocab_size, training=False) # ExtendedTransformer2-4
-                predictions_gd = greedy_decode(transformer, source, max_trg_len, max_src_len, 3, 2, relative_ids=relative_ids, src_vocab_size=src_vocab_size)
+                predictions = transformer(source, target_input, relative_ids[0], relative_ids[1], relative_ids[2], src_vocab_size) # ExtendedTransformer2-4
             
             accuracy = sequence_level_accuracy(predictions, target_real)
             sl_accuracies.append(accuracy)
-            accuracy_gd = sequence_level_accuracy(predictions_gd, target_real, greedy=True)
-            sl_accuracies_gd.append(accuracy_gd)
     
     print(f"Sequence-level accuracy: {np.mean(sl_accuracies)}")
-    print(f"Sequence-level accuracy with Greedy Decoding: {np.mean(sl_accuracies_gd)}")
     return np.mean(sl_accuracies)
 
-def greedy_decode(transformer, src, max_len_trg, max_len_src, start_symbol, eos_token, relative_ids=None, src_vocab_size=None, device='cuda'):
-    transformer.eval()
-    batch_size = src.shape[0]
-    trg = torch.zeros(batch_size, max_len_trg).fill_(start_symbol).type(torch.long).to(device)
-
-    with torch.no_grad():
-        src_embedded = transformer.encoder_embedding(src)
-        src_embedded = transformer.positional_encoding_enc(src_embedded)
-        src_mask = transformer.create_padding_mask(src)
-        if relative_ids is not None:
-            enc_output = transformer.encoder(src_embedded, relative_ids[0], src_mask, training=False)
-        else:
-            enc_output = transformer.encoder(src_embedded, src_mask, training=False)
-    
-    for i in range(max_len_trg - 1):
-        target = trg[:, :i + 1]
-
-        with torch.no_grad():
-            trg_embedded = transformer.decoder_embedding(target)
-            trg_embedded = transformer.positional_encoding_dec(trg_embedded)
-            src_mask = transformer.create_padding_mask(src)
-            look_ahead_mask = transformer.create_look_ahead_mask(target.shape[1])
-            dec_trg_padding_mask = transformer.create_padding_mask(target)
-            trg_mask = torch.max(look_ahead_mask, dec_trg_padding_mask)
-            if relative_ids is not None:
-                relative_ids = Encoding.create_relative_ids(max_len_src, i + 2, 16, False)
-                dec_output = transformer.decoder(trg_embedded, enc_output, relative_ids[1], relative_ids[2], trg_mask, src_mask, training=False)
-            else:
-                dec_output = transformer.decoder(trg_embedded, enc_output, trg_mask, src_mask, training=False)
-            output = F.softmax(transformer.fc(dec_output), dim=-1)
-        
-        next_token = output[:, -1, :].argmax(dim=-1, keepdim=True)
-        trg[:, i + 1] = next_token.squeeze()
-        
-        if (next_token == eos_token).all():
-            break
-    print(trg[0])
-    return trg
-    
-
-'''
-def sequence_accuracy(predictions, targets, pad_token):
-    # Ensure predictions and targets are both tensors for comparison
-    #if isinstance(predictions, list):
-    #    predictions = torch.stack(predictions)  # Convert list of tensors to a single tensor if needed
-
-    # Strip out padding tokens from both predictions and targets
-    predictions = predictions.cpu().numpy()
-    targets = targets.cpu().numpy()
-
-    # Initialize counters
-    correct_sequences = 0
-    total_sequences = predictions.shape[0]  # Number of sequences
-
-    # Loop through each sequence and compare
-    for i in range(total_sequences):
-        # Remove padding tokens for both prediction and target
-        pred_seq = [token for token in predictions[i] if token != pad_token]
-        trg_seq = [token for token in targets[i] if token != pad_token]
-        # Check if both sequences match exactly
-        if pred_seq == trg_seq:
-            correct_sequences += 1
-
-    # Calculate the accuracy
-    accuracy = correct_sequences / total_sequences
-
-    return accuracy * 100
-
-def token_accuracy(predictions, targets, pad_token):
-    # Ensure predictions and targets are on CPU for comparison
-    predictions = predictions.cpu().numpy()
-    targets = targets.cpu().numpy()
-
-    # Mask padding tokens in targets
-    mask = targets != pad_token       # True for non-pad tokens
-
-    # Count correct token predictions (ignoring padding)
-    correct_tokens = (predictions == targets) & mask
-    total_valid_tokens = mask.sum()  # Total valid (non-padding) tokens
-
-    # Calculate accuracy as a percentage
-    accuracy = correct_tokens.sum() / total_valid_tokens * 100 if total_valid_tokens > 0 else 0
-
-    return accuracy
-
-# Testing function
-def test_transformer_with_accuracy(model, dataloader, pad_token, start_symbol, max_len_trg, max_len_src=0, relative_ids=None, src_vocab_size=None, device='cuda', add=False):
-    model.eval()  # Set model to evaluation mode
-    all_predictions = []
-    all_targets = []
-
-    with torch.no_grad():
-        for data_test in dataloader:
-            src, trg = data_test
-            src, trg = src.to(device), trg.to(device)
-            target_input = trg[:, :-1]
-            target_real = trg[:, 1:]
-
-            # Greedy decode to generate predictions
-            predicted_trg = greedy_decode(model, src, max_len_trg, max_len_src, start_symbol, pad_token, relative_ids, src_vocab_size, device)
-            #print(f"Prediction: {predicted_trg.tolist()[0]}, Target: {target_real.tolist()[0]}")
-            # Store the predicted sequences and targets
-            all_predictions.append(predicted_trg[:, 1:])
-            all_targets.append(target_real)
-
-    # Flatten predictions and targets to a single tensor
-    all_predictions = torch.cat(all_predictions, dim=0)  # (total_batches * batch_size, max_len)
-    all_targets = torch.cat(all_targets, dim=0)  # (total_batches * batch_size, target_sequence_length)
-
-    # Calculate sequence-level accuracy
-    accuracy = sequence_accuracy(all_predictions, all_targets, pad_token)
-    accuracy_t = token_accuracy(all_predictions, all_targets, pad_token)
-
-    print(f"Greedy Decode, Sequence-level Accuracy: {accuracy}, Token Acuracy: {accuracy_t}")
-    return accuracy_t
-'''
 
 # Datasets and Dataloaders
 class CustomDataset(Dataset):
-    def __init__(self, input_tensor, target_tensor):
+    def __init__(self, input_tensor, target_tensor, transform=None, target_transform=None):
         self.input = input_tensor
         self.target = target_tensor
+        self.transform = transform
+        self.target_transform = target_transform
 
     def __len__(self):
         return len(self.target)
 
     def __getitem__(self, idx):
-        return self.input[idx], self.target[idx]
+        if self.transform is not None:
+            inp = self.transform(self.input[idx])
+        else:
+            inp = torch.LongTensor(self.input[idx])
+        if self.target_transform is not None:
+            trg = self.target_transform(self.target[idx])
+        else:
+            trg = torch.LongTensor(self.target[idx])
+        return inp, trg
 
 
-random.seed(111)
-np.random.seed(111)
+# Seeds to generate same datasets
+random.seed(1234)
+np.random.seed(1234)
 torch.manual_seed(111)
 seeds = [111, 222, 1111, 2222, 11111]
 
-'''
+
 # Add dataset
 print("Add Dataset")
-(add_vocab, add_vocab_to_int, input_tensor_train, target_tensor_train, input_tensor_val_list, target_tensor_val_list) = Datasets.create_addition_dataset(200000, 1024)
+(add_vocab, add_vocab_to_int, input_tensor_train, target_tensor_train, input_tensor_val_list, target_tensor_val_list, add_max_len_inp, add_max_len_trg) = Datasets.create_addition_dataset(200000, 1024)
 add_dataset_train = CustomDataset(input_tensor_train, target_tensor_train)
-add_dataset_test = CustomDataset(input_tensor_val_list, target_tensor_val_list)
+add_dataset_test0 = CustomDataset(input_tensor_val_list[0], target_tensor_val_list[0])
+add_dataset_test1 = CustomDataset(input_tensor_val_list[1], target_tensor_val_list[1])
+add_dataset_test2 = CustomDataset(input_tensor_val_list[2], target_tensor_val_list[2])
+add_dataset_test3 = CustomDataset(input_tensor_val_list[3], target_tensor_val_list[3])
 
 add_train_loader = DataLoader(add_dataset_train, batch_size=64, shuffle=True)
-add_test_loader = DataLoader(add_dataset_test, batch_size=64, shuffle=False)
+add_test_loader0 = DataLoader(add_dataset_test0, batch_size=64, shuffle=False)
+add_test_loader1 = DataLoader(add_dataset_test1, batch_size=64, shuffle=False)
+add_test_loader2 = DataLoader(add_dataset_test2, batch_size=64, shuffle=False)
+add_test_loader3 = DataLoader(add_dataset_test3, batch_size=64, shuffle=False)
 
 example_train = add_dataset_train.__getitem__(3)
 print(f"Add train example from tokens: input {decode_example(example_train[0], add_vocab)}, output {decode_example(example_train[1], add_vocab)}")
@@ -284,20 +183,26 @@ print(f"Length of Add Vocabulary: {len(add_vocab)}")
 
 # AddNeg dataset
 print("AddNeg Dataset")
-(addNeg_vocab, addNeg_vocab_to_int, input_tensor_train, target_tensor_train, input_tensor_val_list, target_tensor_val_list) = Datasets.create_addition_dataset(200000, 1024, negativeProbability=0.25)
+(addNeg_vocab, addNeg_vocab_to_int, input_tensor_train, target_tensor_train, input_tensor_val_list, target_tensor_val_list, addNeg_max_len_inp, addNeg_max_len_trg) = Datasets.create_addition_dataset(200000, 1024, negativeProbability=0.25)
 addNeg_dataset_train = CustomDataset(input_tensor_train, target_tensor_train)
-addNeg_dataset_test = CustomDataset(input_tensor_val_list, target_tensor_val_list)
+addNeg_dataset_test0 = CustomDataset(input_tensor_val_list[0], target_tensor_val_list[0])
+addNeg_dataset_test1 = CustomDataset(input_tensor_val_list[1], target_tensor_val_list[1])
+addNeg_dataset_test2 = CustomDataset(input_tensor_val_list[2], target_tensor_val_list[2])
+addNeg_dataset_test3 = CustomDataset(input_tensor_val_list[3], target_tensor_val_list[3])
 
 addNeg_train_loader = DataLoader(addNeg_dataset_train, batch_size=64, shuffle=True)
-addNeg_test_loader = DataLoader(addNeg_dataset_test, batch_size=64, shuffle=False)
+addNeg_test_loader0 = DataLoader(addNeg_dataset_test0, batch_size=64, shuffle=False)
+addNeg_test_loader1 = DataLoader(addNeg_dataset_test1, batch_size=64, shuffle=False)
+addNeg_test_loader2 = DataLoader(addNeg_dataset_test2, batch_size=64, shuffle=False)
+addNeg_test_loader3 = DataLoader(addNeg_dataset_test3, batch_size=64, shuffle=False)
 
 example_train = addNeg_dataset_train.__getitem__(3)
 print(f"AddNeg train example from tokens: input {decode_example(example_train[0], addNeg_vocab)}, output {decode_example(example_train[1], addNeg_vocab)}")
 print(f"Length of AddNeg Vocabulary: {len(addNeg_vocab)}")
-'''
+
 # Reverse dataset
 print("Reverse Dataset")
-(reverse_vocab, reverse_vocab_to_int, input_tensor_train, target_tensor_train, input_tensor_val_list, target_tensor_val_list) = Datasets.create_reversing_dataset(200000, 1024)
+(reverse_vocab, reverse_vocab_to_int, input_tensor_train, target_tensor_train, input_tensor_val_list, target_tensor_val_list, reverse_max_len_inp, reverse_max_len_trg) = Datasets.create_reversing_dataset(200000, 1024)
 reverse_dataset_train = CustomDataset(input_tensor_train, target_tensor_train)
 reverse_dataset_test0 = CustomDataset(input_tensor_val_list[0], target_tensor_val_list[0])
 reverse_dataset_test1 = CustomDataset(input_tensor_val_list[1], target_tensor_val_list[1])
@@ -311,10 +216,10 @@ reverse_test_loader2 = DataLoader(reverse_dataset_test2, batch_size=64, shuffle=
 example_train = reverse_dataset_train.__getitem__(1)
 print(f"Reverse train example from tokens: input {decode_example(example_train[0], reverse_vocab)}, output {decode_example(example_train[1], reverse_vocab)}")
 print(f"Length of Reverse Vocabulary: {len(reverse_vocab)}")
-'''
+
 # Dup dataset
 print("Dup Dataset")
-(dup_vocab, dup_vocab_to_int, input_tensor_train, target_tensor_train, input_tensor_val_list, target_tensor_val_list) = Datasets.create_duplicating_dataset(200000, 1024)
+(dup_vocab, dup_vocab_to_int, input_tensor_train, target_tensor_train, input_tensor_val_list, target_tensor_val_list, dup_max_len_inp, dup_max_len_trg) = Datasets.create_duplicating_dataset(200000, 1024)
 dup_dataset_train = CustomDataset(input_tensor_train, target_tensor_train)
 dup_dataset_test0 = CustomDataset(input_tensor_val_list[0], target_tensor_val_list[0])
 dup_dataset_test1 = CustomDataset(input_tensor_val_list[1], target_tensor_val_list[1])
@@ -326,112 +231,74 @@ dup_test_loader1 = DataLoader(dup_dataset_test1, batch_size=64, shuffle=False)
 dup_test_loader2 = DataLoader(dup_dataset_test2, batch_size=64, shuffle=False)
 
 example_train = dup_dataset_train.__getitem__(1)
+print(f"Dup raw input: {example_train[0]}, raw output: {example_train[1]}")
 print(f"Dup train example from tokens: input {decode_example(example_train[0], dup_vocab)}, output {decode_example(example_train[1], dup_vocab)}")
 print(f"Length of Dup Vocabulary: {len(dup_vocab)}")
 
-# Cart dataset
-print("Cart Dataset")
-(cart_vocab, cart_vocab_to_int, input_tensor_train, target_tensor_train, input_tensor_val_list, target_tensor_val_list) = Datasets.create_cartesian_dataset(200000, 1024)
-cart_dataset_train = CustomDataset(input_tensor_train, target_tensor_train)
-cart_dataset_test0 = CustomDataset(input_tensor_val_list[0], target_tensor_val_list[0])
-cart_dataset_test1 = CustomDataset(input_tensor_val_list[1], target_tensor_val_list[1])
-cart_dataset_test2 = CustomDataset(input_tensor_val_list[2], target_tensor_val_list[2])
+# SCAN-l dataset
+print("SCAN-l dataset")
+(scanl_vocab, scanl_vocab_to_int, input_tensor_train, target_tensor_train, input_tensor_val_list, target_tensor_val_list, scanl_max_len_inp, scanl_max_len_trg) = Datasets.create_scan_dataset("tasks_train_length.txt", "tasks_test_length.txt")
+scanl_dataset_train = CustomDataset(input_tensor_train, target_tensor_train)
+scanl_dataset_test0 = CustomDataset(input_tensor_val_list[0], target_tensor_val_list[0])
+scanl_dataset_test1 = CustomDataset(input_tensor_val_list[1], target_tensor_val_list[1])
 
-cart_train_loader = DataLoader(cart_dataset_train, batch_size=64, shuffle=True)
-cart_test_loader0 = DataLoader(cart_dataset_test0, batch_size=64, shuffle=False)
-cart_test_loader1 = DataLoader(cart_dataset_test1, batch_size=64, shuffle=False)
-cart_test_loader2 = DataLoader(cart_dataset_test2, batch_size=64, shuffle=False)
+scanl_train_loader = DataLoader(scanl_dataset_train, batch_size=64, shuffle=True)
+scanl_test_loader0 = DataLoader(scanl_dataset_test0, batch_size=64, shuffle=False)
+scanl_test_loader1 = DataLoader(scanl_dataset_test1, batch_size=64, shuffle=False)
 
-train_source, train_target = next(iter(cart_dataset_train))
-cart_max_seq_length_enc = train_source.shape[-1]
-cart_max_seq_length_dec = train_target.shape[-1]
-test_source1, test_target1 = next(iter(cart_dataset_test1))
-cart_max_seq_length_enc1 = test_source1.shape[-1]
-cart_max_seq_length_dec1 = test_target1.shape[-1]
-test_source2, test_target2 = next(iter(cart_dataset_test2))
-cart_max_seq_length_enc2 = test_source2.shape[-1]
-cart_max_seq_length_dec2 = test_target2.shape[-1]
+example_train = scanl_dataset_train.__getitem__(1)
+print(f"SCAN-l raw input: {example_train[0]}, raw output: {example_train[1]}")
+print(f"SCAN-l train example from tokens: input {decode_example(example_train[0], scanl_vocab)}, output {decode_example(example_train[1], scanl_vocab)}")
+print(f"Length of SCAN-l Vocabulary: {len(scanl_vocab)}")
 
-example_train = cart_dataset_train.__getitem__(1)
-print(f"Cart train example from tokens: input {decode_example(example_train[0], cart_vocab)}, output {decode_example(example_train[1], cart_vocab)}")
-print(f"Length of Cart Vocabulary: {len(cart_vocab)}")
+# SCAN-aj dataset
+print("SCAN-aj dataset")
+(scanaj_vocab, scanaj_vocab_to_int, input_tensor_train, target_tensor_train, input_tensor_val_list, target_tensor_val_list, scanaj_max_len_inp, scanaj_max_len_trg) = Datasets.create_scan_dataset("tasks_train_addprim_jump.txt", "tasks_test_addprim_jump.txt")
+scanaj_dataset_train = CustomDataset(input_tensor_train, target_tensor_train)
+scanaj_dataset_test0 = CustomDataset(input_tensor_val_list[0], target_tensor_val_list[0])
+scanaj_dataset_test1 = CustomDataset(input_tensor_val_list[1], target_tensor_val_list[1])
 
-# Inters dataset
-print("Inters Dataset")
-(inters_vocab, inters_vocab_to_int, input_tensor_train, target_tensor_train, input_tensor_val_list, target_tensor_val_list) = Datasets.create_intersection_dataset(200000, 1024)
-inters_dataset_train = CustomDataset(input_tensor_train, target_tensor_train)
-inters_dataset_test0 = CustomDataset(input_tensor_val_list[0], target_tensor_val_list[0])
-inters_dataset_test1 = CustomDataset(input_tensor_val_list[1], target_tensor_val_list[1])
-inters_dataset_test2 = CustomDataset(input_tensor_val_list[2], target_tensor_val_list[2])
+scanaj_train_loader = DataLoader(scanaj_dataset_train, batch_size=64, shuffle=True)
+scanaj_test_loader0 = DataLoader(scanaj_dataset_test0, batch_size=64, shuffle=False)
+scanaj_test_loader1 = DataLoader(scanaj_dataset_test1, batch_size=64, shuffle=False)
 
-inters_train_loader = DataLoader(inters_dataset_train, batch_size=64, shuffle=True)
-inters_test_loader0 = DataLoader(inters_dataset_test0, batch_size=64, shuffle=False)
-inters_test_loader1 = DataLoader(inters_dataset_test1, batch_size=64, shuffle=False)
-inters_test_loader2 = DataLoader(inters_dataset_test2, batch_size=64, shuffle=False)
+example_train = scanl_dataset_train.__getitem__(1)
+print(f"SCAN-aj raw input: {example_train[0]}, raw output: {example_train[1]}")
+print(f"SCAN-aj train example from tokens: input {decode_example(example_train[0], scanaj_vocab)}, output {decode_example(example_train[1], scanaj_vocab)}")
+print(f"Length of SCAN-aj Vocabulary: {len(scanaj_vocab)}")
 
-train_source, train_target = next(iter(inters_dataset_train))
-inters_max_seq_length_enc = train_source.shape[-1]
-inters_max_seq_length_dec = train_target.shape[-1]
-test_source1, test_target1 = next(iter(inters_dataset_test1))
-inters_max_seq_length_enc1 = test_source1.shape[-1]
-inters_max_seq_length_dec1 = test_target1.shape[-1]
-test_source2, test_target2 = next(iter(inters_dataset_test2))
-inters_max_seq_length_enc2 = test_source2.shape[-1]
-inters_max_seq_length_dec2 = test_target2.shape[-1]
+# PCFG-p dataset
+print("PCFG-p dataset")
+(pcfgp_vocab, pcfgp_vocab_to_int, input_tensor_train, target_tensor_train, input_tensor_val_list, target_tensor_val_list, pcfgp_max_len_inp, pcfgp_max_len_trg) = Datasets.create_pcfg_datset("productivity")
+pcfgp_dataset_train = CustomDataset(input_tensor_train, target_tensor_train)
+pcfgp_dataset_test0 = CustomDataset(input_tensor_val_list[0], target_tensor_val_list[0])
+pcfgp_dataset_test1 = CustomDataset(input_tensor_val_list[1], target_tensor_val_list[1])
 
-example_train = inters_dataset_train.__getitem__(0)
-print(f"Inters train example from tokens: input {decode_example(example_train[0], inters_vocab)}, output {decode_example(example_train[1], inters_vocab)}")
-print(f"Length of Inters Vocabulary: {len(inters_vocab)}")
+pcfgp_train_loader = DataLoader(pcfgp_dataset_train, batch_size=64, shuffle=True)
+pcfgp_test_loader0 = DataLoader(pcfgp_dataset_test0, batch_size=64, shuffle=False)
+pcfgp_test_loader1 = DataLoader(pcfgp_dataset_test1, batch_size=64, shuffle=False)
+
+example_train = pcfgp_dataset_train.__getitem__(1)
+print(f"PCFG-p train example from tokens: input {decode_example(example_train[0], pcfgp_vocab)}, output {decode_example(example_train[1], pcfgp_vocab)}")
+print(f"Length of PCFG-p Vocabulary: {len(pcfgp_vocab)}")
+
+# PCFG-s dataset
+print("PCFG-s dataset")
+(pcfgs_vocab, pcfgs_vocab_to_int, input_tensor_train, target_tensor_train, input_tensor_val_list, target_tensor_val_list, pcfgs_max_len_inp, pcfgs_max_len_trg) = Datasets.create_pcfg_datset("systematicity")
+pcfgs_dataset_train = CustomDataset(input_tensor_train, target_tensor_train)
+pcfgs_dataset_test0 = CustomDataset(input_tensor_val_list[0], target_tensor_val_list[0])
+pcfgs_dataset_test1 = CustomDataset(input_tensor_val_list[1], target_tensor_val_list[1])
+
+pcfgs_train_loader = DataLoader(pcfgs_dataset_train, batch_size=64, shuffle=True)
+pcfgs_test_loader0 = DataLoader(pcfgs_dataset_test0, batch_size=64, shuffle=False)
+pcfgs_test_loader1 = DataLoader(pcfgs_dataset_test1, batch_size=64, shuffle=False)
+
+example_train = pcfgs_dataset_train.__getitem__(1)
+print(f"PCFG-s train example from tokens: input {decode_example(example_train[0], pcfgs_vocab)}, output {decode_example(example_train[1], pcfgs_vocab)}")
+print(f"Length of PCFG-s Vocabulary: {len(pcfgs_vocab)}")
 
 
-# Learning rate scheduler
-class CustomScheduler2(_LRScheduler):
-    def __init__(self, optimizer, d_model, warmup_steps=4000, last_epoch=-1):
-        super(CustomScheduler, self).__init__(optimizer, last_epoch)
-        self.d_model = d_model
-        self.warmup_steps = warmup_steps
-        self.d_model = torch.tensor(self.d_model, dtype=torch.float32)
-
-    def get_lr(self):
-        # Get the current training step
-        step = max(1, self._step_count)  # Ensure step is at least 1 to avoid division by zero
-
-        # Calculate the learning rate according to the custom schedule
-        arg1 = torch.rsqrt(torch.tensor(step, dtype=torch.float32))
-        arg2 = step * (self.warmup_steps ** -1.5)
-
-        return [torch.rsqrt(self.d_model) * min(arg1, arg2)]
-
-class CustomScheduler(torch.optim.lr_scheduler.LambdaLR):
-    def __init__(self, optimizer, d_model, warmup_steps=4000, last_epoch=-1):
-        self.d_model = d_model
-        self.warmup_steps = warmup_steps
-        super(CustomScheduler, self).__init__(optimizer, self.lr_lambda, last_epoch=last_epoch)
-
-    def lr_lambda(self, step):
-        # Ensure that step is at least 1 to avoid division by zero issues
-        step = max(step, 1)
-        
-        # Calculate the two components of the learning rate schedule
-        arg1 = step ** -0.5
-        arg2 = step * (self.warmup_steps ** -1.5)
-        
-        # Return the final learning rate scaling factor
-        return (self.d_model ** -0.5) * min(arg1, arg2)
-
-class TransformerLRScheduler(torch.optim.lr_scheduler.LambdaLR):
-    def __init__(self, optimizer, d_model, warmup_steps=4000, last_epoch=-1):
-        self.d_model = d_model
-        self.warmup_steps = warmup_steps
-        super(TransformerLRScheduler, self).__init__(optimizer, self.lr_lambda, last_epoch=last_epoch)
-
-    def lr_lambda(self, step):
-        # This function calculates the current learning rate factor
-        step = max(step, 1)
-        arg1 = step ** -0.5
-        arg2 = step * (self.warmup_steps ** -1.5)
-        return (self.d_model ** -0.5) * min(arg1, arg2)
-'''
+# Learning rate Scheduler
 class ScheduledOptim():
     def __init__(self, optimizer, lr_mul, d_model, n_warmup_steps):
         self._optimizer = optimizer
@@ -441,12 +308,12 @@ class ScheduledOptim():
         self.n_steps = 0
 
     def step_and_update_lr(self):
-        "Step with the inner optimizer"
+        # Step with the inner optimizer
         self._update_learning_rate()
         self._optimizer.step()
 
     def zero_grad(self):
-        "Zero out the gradients with the inner optimizer"
+        # Zero out the gradients with the inner optimizer
         self._optimizer.zero_grad()
 
     def _get_lr_scale(self):
@@ -461,12 +328,11 @@ class ScheduledOptim():
             param_group['lr'] = lr
 
 
-# Utility function to get results
 def get_results_Table1(vocab, max_len_enc, max_len_dec, epochs, train_loader,
-                       test_loader, test_loader1=None, test_loader2=None, repetitions=1, device='cuda'):
+                       test_loader, test_loader1, test_loader2=None, test_loader3=None, repetitions=1, device='cuda'):
     accuracies_rep = []
-    for i in range(repetitions):
-        torch.manual_seed(seeds[i])
+    for rep in range(repetitions):
+        torch.manual_seed(seeds[rep])
         accuracies = []
 
         transformer_abs = Transformer.Transformer(len(vocab), len(vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=max_len_enc,
@@ -486,53 +352,62 @@ def get_results_Table1(vocab, max_len_enc, max_len_dec, epochs, train_loader,
         
         transformers_rel = [transformer_relE, transformer_relB, transformer_relEB]
         transformers_rel2 = [transformer_rel2E, transformer_rel2B, transformer_rel2EB]
-
-        optimizer = ScheduledOptim(torch.optim.Adam(transformer_abs.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9),1,  64, 4000)
-        criterion = torch.nn.CrossEntropyLoss(ignore_index=0)
-        acc_1 = []
-        for epoch in range (epochs):
-            train_losses = train_step(transformer_abs, optimizer, train_loader, epoch=epoch, criterion=criterion, device=device)
-            accuracy = test(transformer_abs, test_loader, max_len_dec, max_len_enc, device=device)
-            if test_loader1 is not None and test_loader2 is not None:
-                accuracy1 = test(transformer_abs, test_loader1, max_len_dec, max_len_enc, device=device)
-                accuracy2 = test(transformer_abs, test_loader2, max_len_dec, max_len_enc, device=device)
-                accuracy = accuracy2 #np.mean([accuracy, accuracy1, accuracy2])
-            acc_1.append(accuracy)
-        accuracies.append(np.mean(acc_1))
         
-        acc_2 = []
+        optimizer = ScheduledOptim(torch.optim.Adam(transformer_abs.parameters(), lr=1e-5, betas=(0.9, 0.98), eps=1e-9), 0.008, 64, 4000)
+        criterion = torch.nn.CrossEntropyLoss(ignore_index=0)
+        for epoch in range (epochs):
+            train_losses = train_step(transformer_abs, optimizer, train_loader, epoch=epoch, criterion=criterion, clip=True, device=device)
+            print("Testing:")
+            accuracy0 = test(transformer_abs, test_loader, device=device)
+            accuracy1 = test(transformer_abs, test_loader1, device=device)
+            accuracy = accuracy1
+            if test_loader2 is not None:
+                accuracy2 = test(transformer_abs, test_loader2, device=device)
+                accuracy = accuracy2
+            if test_loader3 is not None:
+                accuracy3 = test(transformer_abs, test_loader3, device=device)
+                accuracy = accuracy3
+        accuracies.append(accuracy)
+              
         for transformer in transformers_rel:
-            optimizer = ScheduledOptim(torch.optim.Adam(transformer.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9), 1, 64, 4000)
+            optimizer = ScheduledOptim(torch.optim.Adam(transformer.parameters(), lr=1e-5, betas=(0.9, 0.98), eps=1e-9), 0.008, 64, 4000)
             criterion = torch.nn.CrossEntropyLoss(ignore_index=0)
             enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(max_len_enc, max_len_dec,
                                                                                                     16, dec2enc_ids=False)
             for epoch in range(epochs):
                 train_losses = train_step(transformer, optimizer, train_loader,
-                                    relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), epoch=epoch, criterion=criterion, device=device)
-                accuracy = test(transformer, test_loader, max_len_dec, max_len_enc, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
-                if test_loader1 is not None and test_loader2 is not None:
-                    accuracy1 = test(transformer, test_loader1, max_len_dec, max_len_enc, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
-                    accuracy2 = test(transformer, test_loader2, max_len_dec, max_len_enc, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
-                    accuracy = accuracy2 #np.mean([accuracy, accuracy1, accuracy2])
-                acc_2.append(accuracy)
-            accuracies.append(np.mean(acc_2))
+                                    relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), epoch=epoch, criterion=criterion, clip=True, device=device)
+                print("Testing:")
+                accuracy0 = test(transformer, test_loader, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
+                accuracy1 = test(transformer, test_loader1, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
+                accuracy = accuracy1
+                if test_loader2 is not None:
+                    accuracy2 = test(transformer, test_loader2, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
+                    accuracy = accuracy2
+                if test_loader3 is not None:
+                    accuracy3 = test(transformer, test_loader3, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
+                    accuracy = accuracy3
+            accuracies.append(accuracy)
 
-        acc_3 = []
         for transformer in transformers_rel2:
-            optimizer = ScheduledOptim(torch.optim.Adam(transformer.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9), 1, 64, 4000)
+            optimizer = ScheduledOptim(torch.optim.Adam(transformer.parameters(), lr=1e-5, betas=(0.9, 0.98), eps=1e-9), 0.008, 64, 4000)
             criterion = torch.nn.CrossEntropyLoss(ignore_index=0)
             enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(max_len_enc, max_len_dec,
                                                                                                     16, dec2enc_ids=True)
             for epoch in range(epochs):
                 train_losses = train_step(transformer, optimizer, train_loader,
-                                    relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), epoch=epoch, criterion=criterion, device=device)
-                accuracy = test(transformer, test_loader, max_len_dec, max_len_enc, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids) ,device=device)
-                if test_loader1 is not None and test_loader2 is not None:
-                    accuracy1 = test(transformer, test_loader1, max_len_dec, max_len_enc, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
-                    accuracy2 = test(transformer, test_loader2, max_len_dec, max_len_enc, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
-                    accuracy = accuracy2 #np.mean([accuracy, accuracy1, accuracy2])
-                acc_3.append(accuracy)
-            accuracies.append(np.mean(acc_3))
+                                    relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), epoch=epoch, criterion=criterion, clip=True, device=device)
+                print("Testing:")
+                accuracy0 = test(transformer, test_loader, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids) ,device=device)
+                accuracy1 = test(transformer, test_loader1, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
+                accuracy = accuracy1
+                if test_loader2 is not None:
+                    accuracy2 = test(transformer, test_loader2, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
+                    accuracy = accuracy2
+                if test_loader3 is not None:
+                    accuracy3 = test(transformer, test_loader3, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
+                    accuracy = accuracy3
+            accuracies.append(accuracy)
         
         accuracies_rep.append(accuracies)
         
@@ -545,1085 +420,466 @@ def get_results_Table1(vocab, max_len_enc, max_len_dec, epochs, train_loader,
 
     return accuracies_mean
     
-
 # Table 1
 def table1(device):
-    '''
     # Add dataset
-    accuracies_add = get_results_Table1(add_vocab, 26, 14, 2, add_train_loader, add_test_loader, repetitions=5, device=device)
+    accuracies_add = get_results_Table1(add_vocab, add_max_len_inp, add_max_len_trg, 2, add_train_loader, add_test_loader0,
+                                            add_test_loader1, add_test_loader2, add_test_loader3, repetitions=1, device=device)
     
     # AddNeg dataset
-    accuracies_addNeg = get_results_Table1(addNeg_vocab, 26, 14, 10, addNeg_train_loader, addNeg_test_loader, repetitions=5, device=device)
-    '''
+    accuracies_addNeg = get_results_Table1(addNeg_vocab, addNeg_max_len_inp, addNeg_max_len_trg, 5, addNeg_train_loader, addNeg_test_loader0,
+                                            addNeg_test_loader1, addNeg_test_loader2, addNeg_test_loader3, repetitions=1, device=device) # half epochs
+    
     # Reverse dataset
-    accuracies_reverse = get_results_Table1(reverse_vocab, 25, 26, 2, reverse_train_loader, reverse_test_loader0,
-                                            reverse_test_loader1, reverse_test_loader2, repetitions=5, device=device)
-    '''
+    accuracies_reverse = get_results_Table1(reverse_vocab, reverse_max_len_inp, reverse_max_len_trg, 2, reverse_train_loader, reverse_test_loader0,
+                                            reverse_test_loader1, reverse_test_loader2, repetitions=1, device=device)
+    
     # Dup dataset
-    accuracies_dup = get_results_Table1(dup_vocab, 25, 50, 4, dup_train_loader, dup_test_loader0, dup_test_loader1,
-                                        dup_test_loader2, repetitions=5, device=device)
+    accuracies_dup = get_results_Table1(dup_vocab, dup_max_len_inp, dup_max_len_trg, 4, dup_train_loader, dup_test_loader0,
+                                            dup_test_loader1, dup_test_loader2, repetitions=1, device=device)
+    
+    # SCAN-l dataset
+    accuracies_scanl = get_results_Table1(scanl_vocab, scanl_max_len_inp, scanl_max_len_trg, 12, scanl_train_loader, scanl_test_loader0,
+                                          scanl_test_loader1, repetitions=1, device=device) # half epochs
+    
+    # SCAN-aj dataset
+    accuracies_scanaj = get_results_Table1(scanaj_vocab, scanaj_max_len_inp, scanaj_max_len_trg, 12, scanaj_train_loader, scanaj_test_loader0,
+                                          scanaj_test_loader1, repetitions=1, device=device) # half epochs
+    
+    # PCFG-p dataset
+    accuracies_pcfgp = get_results_Table1(pcfgp_vocab, pcfgp_max_len_inp, pcfgp_max_len_trg, 10, pcfgp_train_loader, pcfgp_test_loader0,
+                                          pcfgp_test_loader1, repetitions=1, device=device) # half epochs
+    
+    # PCFG-s dataset
+    accuracies_pcfgs = get_results_Table1(pcfgs_vocab, pcfgs_max_len_inp, pcfgs_max_len_trg, 10, pcfgs_train_loader, pcfgs_test_loader0,
+                                          pcfgs_test_loader1, repetitions=1, device=device) # half epochs
     '''
-    #TODO SCAN-I, SCAN-aj, PCFG-p, PCFG-s datasets
-
     accuracies_addNeg = [0] * 7
     accuracies_add = [0] * 7
+    accuracies_reverse = [0] * 7
     accuracies_dup = [0] * 7
-    return accuracies_add, accuracies_addNeg, accuracies_reverse, accuracies_dup
-
+    #accuracies_scanl = [0] * 7
+    accuracies_scanaj = [0] * 7
+    accuracies_pcfgp = [0] * 7
+    accuracies_pcfgs = [0] * 7
     '''
-    # Add
-    accuracies_add = []
-    print("Table 1 Add dataset")
-    transformer_abs = Transformer.Transformer(len(add_vocab), len(add_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=26, max_seq_length_dec=14).to(device)
-    transformer_relE = Transformer.ExtendedTransformer1(len(add_vocab), len(add_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=26, max_seq_length_dec=14, attention="rel-e").to(device)
-    transformer_relB = Transformer.ExtendedTransformer1(len(add_vocab), len(add_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=26, max_seq_length_dec=14, attention="rel-b").to(device)
-    transformer_relEB = Transformer.ExtendedTransformer1(len(add_vocab), len(add_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=26, max_seq_length_dec=14, attention="rel-eb").to(device)
-    transformer_rel2E = Transformer.ExtendedTransformer1(len(add_vocab), len(add_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=26, max_seq_length_dec=14, attention="rel2-e").to(device)
-    transformer_rel2B = Transformer.ExtendedTransformer1(len(add_vocab), len(add_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=26, max_seq_length_dec=14, attention="rel2-b").to(device)
-    transformer_rel2EB = Transformer.ExtendedTransformer1(len(add_vocab), len(add_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=26, max_seq_length_dec=14, attention="rel2-eb").to(device)
-    
-    transformers_rel = [transformer_relE, transformer_relB, transformer_relEB]
-    transformers_rel2 = [transformer_rel2E, transformer_rel2B, transformer_rel2EB]
-
-    optimizer = torch.optim.Adam(transformer_abs.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-    #scheduler = CustomScheduler(optimizer, d_model=64, warmup_steps=4000)
-    scheduler = TransformerLRScheduler(optimizer, d_model=64)
-    train_losses = train(transformer_abs, optimizer, scheduler, add_train_loader, epochs=2, device=device)
-    test_loss, accuracy = test(transformer_abs, add_test_loader, add_vocab, device=device)
-    accuracy = test_transformer_with_accuracy(transformer_abs, add_test_loader, 0, 3, 14, device=device)
-    accuracies_add.append(accuracy)
-    
-    for transformer in transformers_rel:
-        optimizer = torch.optim.Adam(transformer.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-        scheduler = TransformerLRScheduler(optimizer, d_model=64)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(26, 14, 16, dec2enc_ids=False)
-        train_losses = train(transformer, optimizer, scheduler, add_train_loader, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), epochs=2, device=device)
-        test_loss, accuracy = test(transformer, add_test_loader, add_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
-        accuracy = test_transformer_with_accuracy(transformer, add_test_loader, 0, 3, 14, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
-        accuracies_add.append(accuracy)
-    
-    for transformer in transformers_rel2:
-        optimizer = torch.optim.Adam(transformer.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-        scheduler = TransformerLRScheduler(optimizer, d_model=64)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(26, 14, 16, dec2enc_ids=True)
-        train_losses = train(transformer, optimizer, scheduler, add_train_loader, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), epochs=2, device=device)
-        test_loss, accuracy = test(transformer, add_test_loader, add_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
-        accuracy = test_transformer_with_accuracy(transformer, add_test_loader, 0, 3, 14, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
-        accuracies_add.append(accuracy)
-    
-    
-    # AddNeg
-    accuracies_addNeg = []
-    print("Table 1 AddNeg dataset")
-    transformer_abs = Transformer.Transformer(len(addNeg_vocab), len(addNeg_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=26, max_seq_length_dec=14).to(device)
-    transformer_relE = Transformer.ExtendedTransformer1(len(addNeg_vocab), len(addNeg_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=26, max_seq_length_dec=14, attention="rel-e").to(device)
-    transformer_relB = Transformer.ExtendedTransformer1(len(addNeg_vocab), len(addNeg_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=26, max_seq_length_dec=14, attention="rel-b").to(device)
-    transformer_relEB = Transformer.ExtendedTransformer1(len(addNeg_vocab), len(addNeg_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=26, max_seq_length_dec=14, attention="rel-eb").to(device)
-    transformer_rel2E = Transformer.ExtendedTransformer1(len(addNeg_vocab), len(addNeg_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=26, max_seq_length_dec=14, attention="rel2-e").to(device)
-    transformer_rel2B = Transformer.ExtendedTransformer1(len(addNeg_vocab), len(addNeg_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=26, max_seq_length_dec=14, attention="rel2-b").to(device)
-    transformer_rel2EB = Transformer.ExtendedTransformer1(len(addNeg_vocab), len(addNeg_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=26, max_seq_length_dec=14, attention="rel2-eb").to(device)
-    
-    transformers_rel = [transformer_relE, transformer_relB, transformer_relEB]
-    transformers_rel2 = [transformer_rel2E, transformer_rel2B, transformer_rel2EB]
-
-    optimizer = torch.optim.Adam(transformer_abs.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-    scheduler = CustomScheduler(optimizer, d_model=64, warmup_steps=4000)
-    train_losses = train(transformer_abs, optimizer, scheduler, addNeg_train_loader, epochs=10, device=device)
-    #test_loss, accuracy = test(transformer_abs, addNeg_test_loader, addNeg_vocab, device=device)
-    accuracy = test_transformer_with_accuracy(transformer_abs, addNeg_test_loader, 0, 3, 14, device=device)
-    accuracies_addNeg.append(accuracy)
-    
-    for transformer in transformers_rel:
-        optimizer = torch.optim.Adam(transformer.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-        scheduler = CustomScheduler(optimizer, d_model=64, warmup_steps=4000)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(26, 14, 16, dec2enc_ids=False)
-        train_losses = train(transformer, optimizer, scheduler, addNeg_train_loader, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), epochs=10, device=device)
-        test_loss, accuracy = test(transformer, addNeg_test_loader, addNeg_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
-        accuracies_addNeg.append(accuracy)
-
-    for transformer in transformers_rel2:
-        optimizer = torch.optim.Adam(transformer.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-        scheduler = CustomScheduler(optimizer, d_model=64, warmup_steps=4000)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(26, 14, 16, dec2enc_ids=True)
-        train_losses = train(transformer, optimizer, scheduler, addNeg_train_loader, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), epochs=10, device=device)
-        test_loss, accuracy = test(transformer, addNeg_test_loader, addNeg_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
-        accuracies_addNeg.append(accuracy)
-    
-
-    # Reverse
-    accuracies_reverse = []
-    print("Table 1 Reverse dataset")
-    transformer_abs = Transformer.Transformer(len(reverse_vocab), len(reverse_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=25, max_seq_length_dec=26).to(device)
-    transformer_relE = Transformer.ExtendedTransformer1(len(reverse_vocab), len(reverse_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=25, max_seq_length_dec=26, attention="rel-e").to(device)
-    transformer_relB = Transformer.ExtendedTransformer1(len(reverse_vocab), len(reverse_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=25, max_seq_length_dec=26, attention="rel-b").to(device)
-    transformer_relEB = Transformer.ExtendedTransformer1(len(reverse_vocab), len(reverse_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=25, max_seq_length_dec=26, attention="rel-eb").to(device)
-    transformer_rel2E = Transformer.ExtendedTransformer1(len(reverse_vocab), len(reverse_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=25, max_seq_length_dec=26, attention="rel2-e").to(device)
-    transformer_rel2B = Transformer.ExtendedTransformer1(len(reverse_vocab), len(reverse_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=25, max_seq_length_dec=26, attention="rel2-b").to(device)
-    transformer_rel2EB = Transformer.ExtendedTransformer1(len(reverse_vocab), len(reverse_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=25, max_seq_length_dec=26, attention="rel2-eb").to(device)
-    
-    transformers_rel = [transformer_relE, transformer_relB, transformer_relEB]
-    transformers_rel2 = [transformer_rel2E, transformer_rel2B, transformer_rel2EB]
-
-    optimizer = torch.optim.Adam(transformer_abs.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-    scheduler = CustomScheduler(optimizer, d_model=64, warmup_steps=4000)
-    train_losses = train(transformer_abs, optimizer, scheduler, reverse_train_loader, epochs=2, device=device)
-    #test_loss0, accuracy0 = test(transformer_abs, reverse_test_loader0, reverse_vocab, device=device)
-    #test_loss1, accuracy1 = test(transformer_abs, reverse_test_loader1, reverse_vocab, device=device)
-    #test_loss2, accuracy2 = test(transformer_abs, reverse_test_loader2, reverse_vocab, device=device)
-    #test_loss = np.mean([test_loss0, test_loss1, test_loss2])
-    accuracy0 = test_transformer_with_accuracy(transformer_abs, reverse_test_loader0, 0, 3, 6, device=device)
-    accuracy1 = test_transformer_with_accuracy(transformer_abs, reverse_test_loader1, 0, 3, 26, device=device)
-    accuracy2 = test_transformer_with_accuracy(transformer_abs, reverse_test_loader2, 0, 3, 26, device=device)
-    accuracy = np.mean([accuracy0, accuracy1, accuracy2])
-    accuracies_reverse.append(accuracy2)
-    
-    for transformer in transformers_rel:
-        optimizer = torch.optim.Adam(transformer.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-        scheduler = CustomScheduler(optimizer, d_model=64, warmup_steps=4000)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(17, 18, 16, dec2enc_ids=False)
-        train_losses = train(transformer, optimizer, scheduler, reverse_train_loader, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), epochs=2, device=device)
-        test_loss0, accuracy0 = test(transformer, reverse_test_loader0, reverse_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
-        test_loss1, accuracy1 = test(transformer, reverse_test_loader1, reverse_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(25, 26, 16, dec2enc_ids=False)
-        test_loss2, accuracy2 = test(transformer, reverse_test_loader2, reverse_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
-        test_loss = np.mean([test_loss0, test_loss1, test_loss2])
-        accuracy = np.mean([accuracy0, accuracy1, accuracy2])
-        accuracies_reverse.append(accuracy)
-    
-    for transformer in transformers_rel2:
-        optimizer = torch.optim.Adam(transformer.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-        scheduler = CustomScheduler(optimizer, d_model=64, warmup_steps=4000)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(17, 18, 16, dec2enc_ids=True)
-        train_losses = train(transformer, optimizer, scheduler, reverse_train_loader, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), epochs=2, device=device)
-        test_loss0, accuracy0 = test(transformer, reverse_test_loader0, reverse_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
-        test_loss1, accuracy1 = test(transformer, reverse_test_loader1, reverse_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(25, 26, 16, dec2enc_ids=True)
-        test_loss2, accuracy2 = test(transformer, reverse_test_loader2, reverse_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
-        test_loss = np.mean([test_loss0, test_loss1, test_loss2])
-        accuracy = np.mean([accuracy0, accuracy1, accuracy2])
-        accuracies_reverse.append(accuracy)
-    
-    
-    # Dup
-    accuracies_dup = []
-    print("Table 1 Dup dataset")
-    transformer_abs = Transformer.Transformer(len(dup_vocab), len(dup_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=25, max_seq_length_dec=50).to(device)
-    transformer_relE = Transformer.ExtendedTransformer1(len(dup_vocab), len(dup_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=25, max_seq_length_dec=50, attention="rel-e").to(device)
-    transformer_relB = Transformer.ExtendedTransformer1(len(dup_vocab), len(dup_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=25, max_seq_length_dec=50, attention="rel-b").to(device)
-    transformer_relEB = Transformer.ExtendedTransformer1(len(dup_vocab), len(dup_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=25, max_seq_length_dec=50, attention="rel-eb").to(device)
-    transformer_rel2E = Transformer.ExtendedTransformer1(len(dup_vocab), len(dup_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=25, max_seq_length_dec=50, attention="rel2-e").to(device)
-    transformer_rel2B = Transformer.ExtendedTransformer1(len(dup_vocab), len(dup_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=25, max_seq_length_dec=50, attention="rel2-b").to(device)
-    transformer_rel2EB = Transformer.ExtendedTransformer1(len(dup_vocab), len(dup_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=25, max_seq_length_dec=50, attention="rel2-eb").to(device)
-    
-    transformers_rel = [transformer_relE, transformer_relB, transformer_relEB]
-    transformers_rel2 = [transformer_rel2E, transformer_rel2B, transformer_rel2EB]
-
-    optimizer = torch.optim.Adam(transformer_abs.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-    scheduler = CustomScheduler(optimizer, d_model=64, warmup_steps=4000)
-    train_losses = train(transformer_abs, optimizer, scheduler, dup_train_loader, epochs=4, device=device)
-    #test_loss0, accuracy0 = test(transformer_abs, dup_test_loader0, dup_vocab, device=device)
-    #test_loss1, accuracy1 = test(transformer_abs, dup_test_loader1, dup_vocab, device=device)
-    #test_loss2, accuracy2 = test(transformer_abs, dup_test_loader2, dup_vocab, device=device)
-    #test_loss = np.mean([test_loss0, test_loss1, test_loss2])
-    accuracy0 = test_transformer_with_accuracy(transformer_abs, dup_test_loader0, 0, 3, 50, device=device)
-    accuracy1 = test_transformer_with_accuracy(transformer_abs, dup_test_loader1, 0, 3, 50, device=device)
-    accuracy2 = test_transformer_with_accuracy(transformer_abs, dup_test_loader2, 0, 3, 50, device=device)
-    accuracy = np.mean([accuracy0, accuracy1, accuracy2])
-    accuracies_dup.append(accuracy2)
-    
-    for transformer in transformers_rel:
-        optimizer = torch.optim.Adam(transformer.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-        scheduler = CustomScheduler(optimizer, d_model=64, warmup_steps=4000)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(17, 34, 16, dec2enc_ids=False)
-        train_losses = train(transformer, optimizer, scheduler, dup_train_loader, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), epochs=4, device=device)
-        test_loss0, accuracy0 = test(transformer, dup_test_loader0, dup_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
-        test_loss1, accuracy1 = test(transformer, dup_test_loader1, dup_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(25, 50, 16, dec2enc_ids=False)
-        test_loss2, accuracy2 = test(transformer, dup_test_loader2, dup_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
-        test_loss = np.mean([test_loss0, test_loss1, test_loss2])
-        accuracy = np.mean([accuracy0, accuracy1, accuracy2])
-        accuracies_dup.append(accuracy)
-    
-    for transformer in transformers_rel2:
-        optimizer = torch.optim.Adam(transformer.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-        scheduler = CustomScheduler(optimizer, d_model=64, warmup_steps=4000)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(17, 34, 16, dec2enc_ids=True)
-        train_losses = train(transformer, optimizer, scheduler, dup_train_loader, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), epochs=4, device=device)
-        test_loss0, accuracy0 = test(transformer, dup_test_loader0, dup_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
-        test_loss1, accuracy1 = test(transformer, dup_test_loader1, dup_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(25, 50, 16, dec2enc_ids=True)
-        test_loss2, accuracy2 = test(transformer, dup_test_loader2, dup_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
-        test_loss = np.mean([test_loss0, test_loss1, test_loss2])
-        accuracy = np.mean([accuracy0, accuracy1, accuracy2])
-        accuracies_dup.append(accuracy)
-    
-    
-    # Cart
-    accuracies_cart = []
-    print("Table 1 Cart dataset")
-    transformer_abs = Transformer.Transformer(len(cart_vocab), len(cart_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=cart_max_seq_length_enc2, max_seq_length_dec=cart_max_seq_length_dec2).to(device)
-    transformer_relE = Transformer.ExtendedTransformer1(len(cart_vocab), len(cart_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=cart_max_seq_length_enc2, max_seq_length_dec=cart_max_seq_length_dec2, attention="rel-e").to(device)
-    transformer_relB = Transformer.ExtendedTransformer1(len(cart_vocab), len(cart_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=cart_max_seq_length_enc2, max_seq_length_dec=cart_max_seq_length_dec2, attention="rel-b").to(device)
-    transformer_relEB = Transformer.ExtendedTransformer1(len(cart_vocab), len(cart_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=cart_max_seq_length_enc2, max_seq_length_dec=cart_max_seq_length_dec2, attention="rel-eb").to(device)
-    transformer_rel2E = Transformer.ExtendedTransformer1(len(cart_vocab), len(cart_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=cart_max_seq_length_enc2, max_seq_length_dec=cart_max_seq_length_dec2, attention="rel2-e").to(device)
-    transformer_rel2B = Transformer.ExtendedTransformer1(len(cart_vocab), len(cart_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=cart_max_seq_length_enc2, max_seq_length_dec=cart_max_seq_length_dec2, attention="rel2-b").to(device)
-    transformer_rel2EB = Transformer.ExtendedTransformer1(len(cart_vocab), len(cart_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=cart_max_seq_length_enc2, max_seq_length_dec=cart_max_seq_length_dec2, attention="rel2-eb").to(device)
-    
-    transformers_rel = [transformer_relE, transformer_relB, transformer_relEB]
-    transformers_rel2 = [transformer_rel2E, transformer_rel2B, transformer_rel2EB]
-
-    optimizer = torch.optim.Adam(transformer_abs.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-    scheduler = CustomScheduler(optimizer, d_model=64, warmup_steps=4000)
-    train_losses = train(transformer_abs, optimizer, scheduler, cart_train_loader, epochs=4, device=device)
-    #test_loss0, accuracy0 = test(transformer_abs, cart_test_loader0, cart_vocab, device=device)
-    #test_loss1, accuracy1 = test(transformer_abs, cart_test_loader1, cart_vocab, device=device)
-    #test_loss2, accuracy2 = test(transformer_abs, cart_test_loader2, cart_vocab, device=device)
-    #test_loss = np.mean([test_loss0, test_loss1, test_loss2])
-    accuracy0 = test_transformer_with_accuracy(transformer_abs, cart_test_loader0, 0, 3, cart_max_seq_length_dec, device=device)
-    accuracy1 = test_transformer_with_accuracy(transformer_abs, cart_test_loader1, 0, 3, cart_max_seq_length_dec1, device=device)
-    accuracy2 = test_transformer_with_accuracy(transformer_abs, cart_test_loader2, 0, 3, cart_max_seq_length_dec2, device=device)
-    accuracy = np.mean([accuracy0, accuracy1, accuracy2])
-    accuracies_cart.append(accuracy2)
-    
-    for transformer in transformers_rel:
-        optimizer = torch.optim.Adam(transformer.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-        scheduler = CustomScheduler(optimizer, d_model=64, warmup_steps=4000)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(cart_max_seq_length_enc, cart_max_seq_length_dec, 16, dec2enc_ids=False)
-        train_losses = train(transformer, optimizer, scheduler, cart_train_loader, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), epochs=4, device=device)
-        test_loss0, accuracy0 = test(transformer, cart_test_loader0, cart_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(cart_max_seq_length_enc1, cart_max_seq_length_dec1, 16, dec2enc_ids=False)
-        test_loss1, accuracy1 = test(transformer, cart_test_loader1, cart_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(cart_max_seq_length_enc2, cart_max_seq_length_dec2, 16, dec2enc_ids=False)
-        test_loss2, accuracy2 = test(transformer, cart_test_loader2, cart_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
-        test_loss = np.mean([test_loss0, test_loss1, test_loss2])
-        accuracy = np.mean([accuracy0, accuracy1, accuracy2])
-        accuracies_cart.append(accuracy)
-    
-    for transformer in transformers_rel2:
-        optimizer = torch.optim.Adam(transformer.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-        scheduler = CustomScheduler(optimizer, d_model=64, warmup_steps=4000)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(cart_max_seq_length_enc, cart_max_seq_length_dec, 16, dec2enc_ids=True)
-        train_losses = train(transformer, optimizer, scheduler, cart_train_loader, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), epochs=4, device=device)
-        test_loss0, accuracy0 = test(transformer, cart_test_loader0, cart_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(cart_max_seq_length_enc1, cart_max_seq_length_dec1, 16, dec2enc_ids=False)
-        test_loss1, accuracy1 = test(transformer, cart_test_loader1, cart_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(cart_max_seq_length_enc2, cart_max_seq_length_dec2, 16, dec2enc_ids=True)
-        test_loss2, accuracy2 = test(transformer, cart_test_loader2, cart_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
-        test_loss = np.mean([test_loss0, test_loss1, test_loss2])
-        accuracy = np.mean([accuracy0, accuracy1, accuracy2])
-        accuracies_cart.append(accuracy)
-    
-    
-    accuracies_inters = []
-    print("Table 1 Inters dataset")
-    transformer_abs = Transformer.Transformer(len(inters_vocab), len(inters_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=inters_max_seq_length_enc2, max_seq_length_dec=3).to(device)
-    transformer_relE = Transformer.ExtendedTransformer1(len(inters_vocab), len(inters_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=inters_max_seq_length_enc2, max_seq_length_dec=inters_max_seq_length_dec2, attention="rel-e").to(device)
-    transformer_relB = Transformer.ExtendedTransformer1(len(inters_vocab), len(inters_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=inters_max_seq_length_enc2, max_seq_length_dec=inters_max_seq_length_dec2, attention="rel-b").to(device)
-    transformer_relEB = Transformer.ExtendedTransformer1(len(inters_vocab), len(inters_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=inters_max_seq_length_enc2, max_seq_length_dec=inters_max_seq_length_dec2, attention="rel-eb").to(device)
-    transformer_rel2E = Transformer.ExtendedTransformer1(len(inters_vocab), len(inters_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=inters_max_seq_length_enc2, max_seq_length_dec=inters_max_seq_length_dec2, attention="rel2-e").to(device)
-    transformer_rel2B = Transformer.ExtendedTransformer1(len(inters_vocab), len(inters_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=inters_max_seq_length_enc2, max_seq_length_dec=inters_max_seq_length_dec2, attention="rel2-b").to(device)
-    transformer_rel2EB = Transformer.ExtendedTransformer1(len(inters_vocab), len(inters_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=inters_max_seq_length_enc2, max_seq_length_dec=inters_max_seq_length_dec2, attention="rel2-eb").to(device)
-    
-    transformers_rel = [transformer_relE, transformer_relB, transformer_relEB]
-    transformers_rel2 = [transformer_rel2E, transformer_rel2B, transformer_rel2EB]
-
-    optimizer = torch.optim.Adam(transformer_abs.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-    scheduler = TransformerLRScheduler(optimizer, d_model=64)
-    train_losses = train(transformer_abs, optimizer, scheduler, inters_train_loader, epochs=8, device=device)
-    test_loss0, accuracy0 = test(transformer_abs, inters_test_loader0, inters_vocab, device=device)
-    test_loss1, accuracy1 = test(transformer_abs, inters_test_loader1, inters_vocab, device=device)
-    test_loss2, accuracy2 = test(transformer_abs, inters_test_loader2, inters_vocab, device=device)
-    test_loss = np.mean([test_loss0, test_loss1, test_loss2])
-    accuracy0 = test_transformer_with_accuracy(transformer_abs, inters_test_loader0, 0, 3, inters_max_seq_length_dec, device=device)
-    accuracy1 = test_transformer_with_accuracy(transformer_abs, inters_test_loader1, 0, 3, inters_max_seq_length_dec1, device=device)
-    accuracy2 = test_transformer_with_accuracy(transformer_abs, inters_test_loader2, 0, 3, inters_max_seq_length_dec2, device=device)
-    accuracy = np.mean([accuracy0, accuracy1, accuracy2])
-    accuracies_inters.append(accuracy2)
-    
-    for transformer in transformers_rel:
-        optimizer = torch.optim.Adam(transformer.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-        scheduler = TransformerLRScheduler(optimizer, d_model=64)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(inters_max_seq_length_enc, inters_max_seq_length_dec, 16, dec2enc_ids=False)
-        train_losses = train(transformer, optimizer, scheduler, inters_train_loader, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), epochs=8, device=device)
-        test_loss0, accuracy0 = test(transformer, inters_test_loader0, inters_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
-        accuracy0 = test_transformer_with_accuracy(transformer, inters_test_loader0, 0, 3, inters_max_seq_length_dec, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(inters_max_seq_length_enc1, inters_max_seq_length_dec1, 16, dec2enc_ids=False)
-        test_loss1, accuracy1 = test(transformer, inters_test_loader1, inters_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
-        accuracy1 = test_transformer_with_accuracy(transformer, inters_test_loader1, 0, 3, inters_max_seq_length_dec1, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device )
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(inters_max_seq_length_enc2, inters_max_seq_length_dec2, 16, dec2enc_ids=False)
-        test_loss2, accuracy2 = test(transformer, inters_test_loader2, inters_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
-        accuracy2 = test_transformer_with_accuracy(transformer, inters_test_loader2, 0, 3, inters_max_seq_length_dec2, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
-        test_loss = np.mean([test_loss0, test_loss1, test_loss2])
-        accuracy = np.mean([accuracy0, accuracy1, accuracy2])
-        accuracies_inters.append(accuracy)
-    
-    for transformer in transformers_rel2:
-        optimizer = torch.optim.Adam(transformer.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-        scheduler = TransformerLRScheduler(optimizer, d_model=64)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(inters_max_seq_length_enc, inters_max_seq_length_dec, 16, dec2enc_ids=True)
-        train_losses = train(transformer, optimizer, scheduler, inters_train_loader, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), epochs=8, device=device)
-        test_loss0, accuracy0 = test(transformer, inters_test_loader0, inters_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
-        accuracy0 = test_transformer_with_accuracy(transformer, inters_test_loader0, 0, 3, inters_max_seq_length_dec, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(inters_max_seq_length_enc1, inters_max_seq_length_dec1, 16, dec2enc_ids=True)
-        test_loss1, accuracy1 = test(transformer, inters_test_loader1, inters_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
-        accuracy1 = test_transformer_with_accuracy(transformer, inters_test_loader1, 0, 3, inters_max_seq_length_dec1, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device )
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(inters_max_seq_length_enc2, inters_max_seq_length_dec2, 16, dec2enc_ids=True)
-        test_loss2, accuracy2 = test(transformer, inters_test_loader2, inters_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
-        accuracy2 = test_transformer_with_accuracy(transformer, inters_test_loader2, 0, 3, inters_max_seq_length_dec2, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), device=device)
-        test_loss = np.mean([test_loss0, test_loss1, test_loss2])
-        accuracy = np.mean([accuracy0, accuracy1, accuracy2])
-        accuracies_inters.append(accuracy)
-      
-    return accuracies_add, accuracies_addNeg, accuracies_reverse, accuracies_dup, accuracies_cart, accuracies_inters
-    
+    return accuracies_add, accuracies_addNeg, accuracies_reverse, accuracies_dup, accuracies_scanl, accuracies_scanaj, accuracies_pcfgp, accuracies_pcfgs
 
 
-# Table 2
+def get_results_Table2(vocab, max_len_enc, max_len_dec, epochs, train_loader,
+                       test_loader, test_loader1, test_loader2=None, test_loader3=None, repetitions=1, device='cuda'):
+    accuracies_rep = []
+    for i in range(repetitions):
+        torch.manual_seed(seeds[i])
+        accuracies = []
+
+        transformer_abs_C = Transformer.ExtendedStdTransformer2(len(vocab), len(vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=max_len_enc,
+                                                                max_seq_length_dec=max_len_dec).to(device)
+        transformer_relEB_C = Transformer.ExtendedTransformer2(len(vocab), len(vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=max_len_enc,
+                                                               max_seq_length_dec=max_len_dec, attention="rel-eb").to(device)
+        transformer_rel2EB_C = Transformer.ExtendedTransformer2(len(vocab), len(vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=max_len_enc,
+                                                                max_seq_length_dec=max_len_dec, attention="rel2-eb").to(device)
+        
+        optimizer = ScheduledOptim(torch.optim.Adam(transformer_abs_C.parameters(), lr=1e-5, betas=(0.9, 0.98), eps=1e-9), 1, 64, 4000)
+        criterion = torch.nn.NLLLoss(ignore_index=0)
+        for epoch in range(epochs):
+            train_losses = train_step(transformer_abs_C, optimizer, train_loader, epoch, criterion, src_vocab_size=len(vocab), clip=True, device=device)
+            print("Testing:")
+            accuracy0 = test(transformer_abs_C, test_loader, src_vocab_size=len(vocab), device=device)
+            accuracy1 = test(transformer_abs_C, test_loader1, src_vocab_size=len(vocab), device=device)
+            accuracy = accuracy1
+            if test_loader2 is not None:
+                accuracy2 = test(transformer_abs_C, test_loader2, src_vocab_size=len(vocab), device=device)
+                accuracy = accuracy2
+            if test_loader3 is not None:
+                accuracy3 = test(transformer_abs_C, test_loader3, src_vocab_size=len(vocab), device=device)
+                accuracy = accuracy3
+        accuracies.append(accuracy)
+        
+        optimizer = ScheduledOptim(torch.optim.Adam(transformer_relEB_C.parameters(), lr=1e-5, betas=(0.9, 0.98), eps=1e-9), 1, 64, 4000)
+        criterion = torch.nn.NLLLoss(ignore_index=0)
+        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(max_len_enc, max_len_dec,
+                                                                                                    16, dec2enc_ids=False)
+        for epoch in range(epochs):
+            train_losses = train_step(transformer_relEB_C, optimizer, train_loader, epoch, criterion, 
+                                      relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(vocab), clip=True, device=device)
+            print("Testing:")
+            accuracy0 = test(transformer_relEB_C, test_loader, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(vocab), device=device)
+            accuracy1 = test(transformer_relEB_C, test_loader1, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(vocab), device=device)
+            accuracy = accuracy1
+            if test_loader2 is not None:
+                accuracy2 = test(transformer_relEB_C, test_loader2, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(vocab), device=device)
+                accuracy = accuracy2
+            if test_loader3 is not None:
+                accuracy3 = test(transformer_relEB_C, test_loader3, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(vocab), device=device)
+                accuracy = accuracy3
+        accuracies.append(accuracy)
+
+        optimizer = ScheduledOptim(torch.optim.Adam(transformer_rel2EB_C.parameters(), lr=1e-5, betas=(0.9, 0.98), eps=1e-9), 1, 64, 4000)
+        criterion = torch.nn.NLLLoss(ignore_index=0)
+        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(max_len_enc, max_len_dec,
+                                                                                                    16, dec2enc_ids=True)
+        for epoch in range(epochs):
+            train_losses = train_step(transformer_rel2EB_C, optimizer, train_loader, epoch, criterion,
+                                      relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(vocab), clip=True, device=device)
+            print("Testing:")
+            accuracy0 = test(transformer_rel2EB_C, test_loader, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(vocab), device=device)
+            accuracy1 = test(transformer_rel2EB_C, test_loader1, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(vocab), device=device)
+            accuracy = accuracy1
+            if test_loader2 is not None:
+                accuracy2 = test(transformer_rel2EB_C, test_loader2, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(vocab), device=device)
+                accuracy = accuracy2
+            if test_loader3 is not None:
+                accuracy3 = test(transformer_relEB_C, test_loader3, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(vocab), device=device)
+                accuracy = accuracy3
+        accuracies.append(accuracy)
+
+        accuracies_rep.append(accuracies)
+        
+    accuracies_sum = [0] * 3 # 3 is the number of different models trained in Table1 for each dataset
+    for i in range(repetitions):
+        for j in range(3):
+            accuracies_sum[j] += accuracies_rep[i][j]
+
+    accuracies_mean = [x / repetitions for x in accuracies_sum]
+
+    return accuracies_mean
+
+# Table2
 def table2(device):
-    # Add
-    accuracies_add = []
-    transformer_abs_C = Transformer.ExtendedStdTransformer2(len(add_vocab), len(add_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=26, max_seq_length_dec=14).to(device)
-    transformer_relEB_C = Transformer.ExtendedTransformer2(len(add_vocab), len(add_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=26, max_seq_length_dec=14, attention="rel-eb").to(device)
-    transformer_rel2EB_C = Transformer.ExtendedTransformer2(len(add_vocab), len(add_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=26, max_seq_length_dec=14, attention="rel2-eb").to(device)
-
-    optimizer = torch.optim.Adam(transformer_abs_C.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-    scheduler = CustomScheduler(optimizer, d_model=64, warmup_steps=4000)
-    train_losses = train(transformer_abs_C, optimizer, scheduler, add_train_loader, epochs=2, src_vocab_size=len(add_vocab), device=device)
-    test_loss, accuracy = test(transformer_abs_C, add_test_loader, add_vocab, src_vocab_size=len(add_vocab), device=device)
-    accuracies_add.append(accuracy)
-
-    optimizer = torch.optim.Adam(transformer_relEB_C.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-    scheduler = CustomScheduler(optimizer, d_model=64, warmup_steps=4000)
-    enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(26, 14, 16, dec2enc_ids=False)
-    train_losses = train(transformer_relEB_C, optimizer, scheduler, add_train_loader, epochs=2, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(add_vocab), device=device)
-    test_loss, accuracy = test(transformer_relEB_C, add_test_loader, add_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(add_vocab), device=device)
-    accuracies_add.append(accuracy)
-
-    optimizer = torch.optim.Adam(transformer_rel2EB_C.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-    scheduler = CustomScheduler(optimizer, d_model=64, warmup_steps=4000)
-    enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(26, 14, 16, dec2enc_ids=True)
-    train_losses = train(transformer_rel2EB_C, optimizer, scheduler, add_train_loader, epochs=2, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(add_vocab), device=device)
-    test_loss, accuracy = test(transformer_rel2EB_C, add_test_loader, add_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(add_vocab), device=device)
-    accuracies_add.append(accuracy)
-
-
-    # AddNeg
-    accuracies_addNeg = []
-    transformer_abs_C = Transformer.ExtendedStdTransformer2(len(addNeg_vocab), len(addNeg_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=26, max_seq_length_dec=14).to(device)
-    transformer_relEB_C = Transformer.ExtendedTransformer2(len(addNeg_vocab), len(addNeg_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=26, max_seq_length_dec=14, attention="rel-eb").to(device)
-    transformer_rel2EB_C = Transformer.ExtendedTransformer2(len(addNeg_vocab), len(addNeg_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=26, max_seq_length_dec=14, attention="rel2-eb").to(device)
-
-    optimizer = torch.optim.Adam(transformer_abs_C.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-    scheduler = CustomScheduler(optimizer, d_model=64, warmup_steps=4000)
-    train_losses = train(transformer_abs_C, optimizer, scheduler, addNeg_train_loader, epochs=10, src_vocab_size=len(addNeg_vocab), device=device)
-    test_loss, accuracy = test(transformer_abs_C, addNeg_test_loader, addNeg_vocab, src_vocab_size=len(addNeg_vocab), device=device)
-    accuracies_addNeg.append(accuracy)
-
-    optimizer = torch.optim.Adam(transformer_relEB_C.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-    scheduler = CustomScheduler(optimizer, d_model=64, warmup_steps=4000)
-    enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(26, 14, 16, dec2enc_ids=False)
-    train_losses = train(transformer_relEB_C, optimizer, scheduler, addNeg_train_loader, epochs=10, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(addNeg_vocab), device=device)
-    test_loss, accuracy = test(transformer_relEB_C, addNeg_test_loader, addNeg_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(addNeg_vocab), device=device)
-    accuracies_addNeg.append(accuracy)
-
-    optimizer = torch.optim.Adam(transformer_rel2EB_C.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-    scheduler = CustomScheduler(optimizer, d_model=64, warmup_steps=4000)
-    enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(26, 14, 16, dec2enc_ids=True)
-    train_losses = train(transformer_rel2EB_C, optimizer, scheduler, addNeg_train_loader, epochs=10, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(addNeg_vocab), device=device)
-    test_loss, accuracy = test(transformer_rel2EB_C, addNeg_test_loader, addNeg_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(addNeg_vocab), device=device)
-    accuracies_addNeg.append(accuracy)
-
-
-    # Reverse
-    accuracies_reverse = []
-    transformer_abs_C = Transformer.ExtendedStdTransformer2(len(reverse_vocab), len(reverse_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=25, max_seq_length_dec=26).to(device)
-    transformer_relEB_C = Transformer.ExtendedTransformer2(len(reverse_vocab), len(reverse_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=25, max_seq_length_dec=26, attention="rel-eb").to(device)
-    transformer_rel2EB_C = Transformer.ExtendedTransformer2(len(reverse_vocab), len(reverse_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=25, max_seq_length_dec=26, attention="rel2-eb").to(device)
-
-    optimizer = torch.optim.Adam(transformer_abs_C.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-    scheduler = CustomScheduler(optimizer, d_model=64, warmup_steps=4000)
-    train_losses = train(transformer_abs_C, optimizer, scheduler, reverse_train_loader, epochs=2, src_vocab_size=len(reverse_vocab), device=device)
-    test_loss0, accuracy0 = test(transformer_abs_C, reverse_test_loader0, reverse_vocab, src_vocab_size=len(reverse_vocab), device=device)
-    test_loss1, accuracy1 = test(transformer_abs_C, reverse_test_loader1, reverse_vocab, src_vocab_size=len(reverse_vocab), device=device)
-    test_loss2, accuracy2 = test(transformer_abs_C, reverse_test_loader2, reverse_vocab, src_vocab_size=len(reverse_vocab), device=device)
-    test_loss = np.mean([test_loss0, test_loss1, test_loss2])
-    accuracy = np.mean([accuracy0, accuracy1, accuracy2])
-    accuracies_reverse.append(accuracy)
-
-    optimizer = torch.optim.Adam(transformer_relEB_C.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-    scheduler = CustomScheduler(optimizer, d_model=64, warmup_steps=4000)
-    enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(17, 18, 16, dec2enc_ids=False)
-    train_losses = train(transformer_relEB_C, optimizer, scheduler, reverse_train_loader, epochs=2, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(reverse_vocab), device=device)
-    test_loss0, accuracy0 = test(transformer_relEB_C, reverse_test_loader0, reverse_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(reverse_vocab), device=device)
-    test_loss1, accuracy1 = test(transformer_relEB_C, reverse_test_loader1, reverse_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(reverse_vocab), device=device)
-    enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(25, 26, 16, dec2enc_ids=False)
-    test_loss2, accuracy2 = test(transformer_relEB_C, reverse_test_loader2, reverse_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(reverse_vocab), device=device)
-    test_loss = np.mean([test_loss0, test_loss1, test_loss2])
-    accuracy = np.mean([accuracy0, accuracy1, accuracy2])
-    accuracies_reverse.append(accuracy)
-
-    optimizer = torch.optim.Adam(transformer_rel2EB_C.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-    scheduler = CustomScheduler(optimizer, d_model=64, warmup_steps=4000)
-    enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(17, 18, 16, dec2enc_ids=True)
-    train_losses = train(transformer_rel2EB_C, optimizer, scheduler, reverse_train_loader, epochs=2, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(reverse_vocab), device=device)
-    test_loss0, accuracy0 = test(transformer_rel2EB_C, reverse_test_loader0, reverse_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(reverse_vocab), device=device)
-    test_loss1, accuracy1 = test(transformer_rel2EB_C, reverse_test_loader1, reverse_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(reverse_vocab), device=device)
-    enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(25, 26, 16, dec2enc_ids=True)
-    test_loss2, accuracy2 = test(transformer_rel2EB_C, reverse_test_loader2, reverse_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(reverse_vocab), device=device)
-    test_loss = np.mean([test_loss0, test_loss1, test_loss2])
-    accuracy = np.mean([accuracy0, accuracy1, accuracy2])
-    accuracies_reverse.append(accuracy)
     
-
-    # Dup
-    accuracies_dup = []
-    transformer_abs_C = Transformer.ExtendedStdTransformer2(len(dup_vocab), len(dup_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=25, max_seq_length_dec=50).to(device)
-    transformer_relEB_C = Transformer.ExtendedTransformer2(len(dup_vocab), len(dup_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=25, max_seq_length_dec=50, attention="rel-eb").to(device)
-    transformer_rel2EB_C = Transformer.ExtendedTransformer2(len(dup_vocab), len(dup_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=25, max_seq_length_dec=50, attention="rel2-eb").to(device)
-
-    optimizer = torch.optim.Adam(transformer_abs_C.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-    scheduler = CustomScheduler(optimizer, d_model=64, warmup_steps=4000)
-    train_losses = train(transformer_abs_C, optimizer, scheduler, dup_train_loader, epochs=4, src_vocab_size=len(dup_vocab), device=device)
-    test_loss0, accuracy0 = test(transformer_abs_C, dup_test_loader0, dup_vocab, src_vocab_size=len(dup_vocab), device=device)
-    test_loss1, accuracy1 = test(transformer_abs_C, dup_test_loader1, dup_vocab, src_vocab_size=len(dup_vocab), device=device)
-    test_loss2, accuracy2 = test(transformer_abs_C, dup_test_loader2, dup_vocab, src_vocab_size=len(dup_vocab), device=device)
-    test_loss = np.mean([test_loss0, test_loss1, test_loss2])
-    accuracy = np.mean([accuracy0, accuracy1, accuracy2])
-    accuracies_dup.append(accuracy)
-
-    optimizer = torch.optim.Adam(transformer_relEB_C.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-    scheduler = CustomScheduler(optimizer, d_model=64, warmup_steps=4000)
-    enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(17, 34, 16, dec2enc_ids=False)
-    train_losses = train(transformer_relEB_C, optimizer, scheduler, dup_train_loader, epochs=4, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(dup_vocab), device=device)
-    test_loss0, accuracy0 = test(transformer_relEB_C, dup_test_loader0, dup_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(dup_vocab), device=device)
-    test_loss1, accuracy1 = test(transformer_relEB_C, dup_test_loader1, dup_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(dup_vocab), device=device)
-    enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(25, 50, 16, dec2enc_ids=False)
-    test_loss2, accuracy2 = test(transformer_relEB_C, dup_test_loader2, dup_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(dup_vocab), device=device)
-    test_loss = np.mean([test_loss0, test_loss1, test_loss2])
-    accuracy = np.mean([accuracy0, accuracy1, accuracy2])
-    accuracies_dup.append(accuracy)
-
-    optimizer = torch.optim.Adam(transformer_rel2EB_C.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-    scheduler = CustomScheduler(optimizer, d_model=64, warmup_steps=4000)
-    enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(17, 34, 16, dec2enc_ids=True)
-    train_losses = train(transformer_rel2EB_C, optimizer, scheduler, dup_train_loader, epochs=4, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(dup_vocab), device=device)
-    test_loss0, accuracy0 = test(transformer_rel2EB_C, dup_test_loader0, dup_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(dup_vocab), device=device)
-    test_loss1, accuracy1 = test(transformer_rel2EB_C, dup_test_loader1, dup_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(dup_vocab), device=device)
-    enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(25, 50, 16, dec2enc_ids=True)
-    test_loss2, accuracy2 = test(transformer_rel2EB_C, dup_test_loader2, dup_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(dup_vocab), device=device)
-    test_loss = np.mean([test_loss0, test_loss1, test_loss2])
-    accuracy = np.mean([accuracy0, accuracy1, accuracy2])
-    accuracies_dup.append(accuracy)
+    # Add dataset
+    accuracies_add = get_results_Table2(add_vocab, add_max_len_inp, add_max_len_trg, 2, add_train_loader, add_test_loader0,
+                                        add_test_loader1, add_test_loader2, add_test_loader3, repetitions=1, device=device)
     
-
-    # Cart
-    accuracies_cart = []
-    transformer_abs_C = Transformer.ExtendedStdTransformer2(len(cart_vocab), len(cart_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=cart_max_seq_length_enc2, max_seq_length_dec=cart_max_seq_length_dec2).to(device)
-    transformer_relEB_C = Transformer.ExtendedTransformer2(len(cart_vocab), len(cart_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=cart_max_seq_length_enc2, max_seq_length_dec=cart_max_seq_length_dec2, attention="rel-eb").to(device)
-    transformer_rel2EB_C = Transformer.ExtendedTransformer2(len(cart_vocab), len(cart_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=cart_max_seq_length_enc2, max_seq_length_dec=cart_max_seq_length_dec2, attention="rel2-eb").to(device)
-
-    optimizer = torch.optim.Adam(transformer_abs_C.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-    scheduler = CustomScheduler(optimizer, d_model=64, warmup_steps=4000)
-    train_losses = train(transformer_abs_C, optimizer, scheduler, cart_train_loader, epochs=4, src_vocab_size=len(cart_vocab), device=device)
-    test_loss0, accuracy0 = test(transformer_abs_C, cart_test_loader0, cart_vocab, src_vocab_size=len(cart_vocab), device=device)
-    test_loss1, accuracy1 = test(transformer_abs_C, cart_test_loader1, cart_vocab, src_vocab_size=len(cart_vocab), device=device)
-    test_loss2, accuracy2 = test(transformer_abs_C, cart_test_loader2, cart_vocab, src_vocab_size=len(cart_vocab), device=device)
-    test_loss = np.mean([test_loss0, test_loss1, test_loss2])
-    accuracy = np.mean([accuracy0, accuracy1, accuracy2])
-    accuracies_cart.append(accuracy)
-
-    optimizer = torch.optim.Adam(transformer_relEB_C.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-    scheduler = CustomScheduler(optimizer, d_model=64, warmup_steps=4000)
-    enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(cart_max_seq_length_enc, cart_max_seq_length_dec, 16, dec2enc_ids=False)
-    train_losses = train(transformer_relEB_C, optimizer, scheduler, cart_train_loader, epochs=4, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(cart_vocab), device=device)
-    test_loss0, accuracy0 = test(transformer_relEB_C, cart_test_loader0, cart_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(cart_vocab), device=device)
-    enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(cart_max_seq_length_enc1, cart_max_seq_length_dec1, 16, dec2enc_ids=False)
-    test_loss1, accuracy1 = test(transformer_relEB_C, cart_test_loader1, cart_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(cart_vocab), device=device)
-    enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(cart_max_seq_length_enc2, cart_max_seq_length_dec2, 16, dec2enc_ids=False)
-    test_loss2, accuracy2 = test(transformer_relEB_C, cart_test_loader2, cart_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(cart_vocab), device=device)
-    test_loss = np.mean([test_loss0, test_loss1, test_loss2])
-    accuracy = np.mean([accuracy0, accuracy1, accuracy2])
-    accuracies_cart.append(accuracy)
-
-    optimizer = torch.optim.Adam(transformer_rel2EB_C.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-    scheduler = CustomScheduler(optimizer, d_model=64, warmup_steps=4000)
-    enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(cart_max_seq_length_enc, cart_max_seq_length_dec, 16, dec2enc_ids=True)
-    train_losses = train(transformer_rel2EB_C, optimizer, scheduler, cart_train_loader, epochs=4, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(cart_vocab), device=device)
-    test_loss0, accuracy0 = test(transformer_rel2EB_C, cart_test_loader0, cart_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(cart_vocab), device=device)
-    enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(cart_max_seq_length_enc1, cart_max_seq_length_dec1, 16, dec2enc_ids=False)
-    test_loss1, accuracy1 = test(transformer_rel2EB_C, cart_test_loader1, cart_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(cart_vocab), device=device)
-    enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(cart_max_seq_length_enc2, cart_max_seq_length_dec2, 16, dec2enc_ids=True)
-    test_loss2, accuracy2 = test(transformer_rel2EB_C, cart_test_loader2, cart_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(cart_vocab), device=device)
-    test_loss = np.mean([test_loss0, test_loss1, test_loss2])
-    accuracy = np.mean([accuracy0, accuracy1, accuracy2])
-    accuracies_cart.append(accuracy)
-
+    # AddNeg dataset
+    accuracies_addNeg = get_results_Table2(addNeg_vocab, addNeg_max_len_inp, addNeg_max_len_trg, 5, addNeg_train_loader, addNeg_test_loader0,
+                                           addNeg_test_loader1, addNeg_test_loader2, addNeg_test_loader3, repetitions=1, device=device) # half epochs
     
-    # Inters
-    accuracies_inters = []
-    transformer_abs_C = Transformer.ExtendedStdTransformer2(len(inters_vocab), len(inters_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=inters_max_seq_length_enc2, max_seq_length_dec=inters_max_seq_length_dec2).to(device)
-    transformer_relEB_C = Transformer.ExtendedTransformer2(len(inters_vocab), len(inters_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=inters_max_seq_length_enc2, max_seq_length_dec=inters_max_seq_length_dec2, attention="rel-eb").to(device)
-    transformer_rel2EB_C = Transformer.ExtendedTransformer2(len(inters_vocab), len(inters_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=inters_max_seq_length_enc2, max_seq_length_dec=inters_max_seq_length_dec2, attention="rel2-eb").to(device)
-
-    optimizer = torch.optim.Adam(transformer_abs_C.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-    scheduler = CustomScheduler(optimizer, d_model=64, warmup_steps=4000)
-    train_losses = train(transformer_abs_C, optimizer, scheduler, inters_train_loader, epochs=8, src_vocab_size=len(inters_vocab), device=device)
-    test_loss0, accuracy0 = test(transformer_abs_C, inters_test_loader0, inters_vocab, src_vocab_size=len(inters_vocab), device=device)
-    test_loss1, accuracy1 = test(transformer_abs_C, inters_test_loader1, inters_vocab, src_vocab_size=len(inters_vocab), device=device)
-    test_loss2, accuracy2 = test(transformer_abs_C, inters_test_loader2, inters_vocab, src_vocab_size=len(inters_vocab), device=device)
-    test_loss = np.mean([test_loss0, test_loss1, test_loss2])
-    accuracy = np.mean([accuracy0, accuracy1, accuracy2])
-    accuracies_inters.append(accuracy)
-
-    optimizer = torch.optim.Adam(transformer_relEB_C.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-    scheduler = CustomScheduler(optimizer, d_model=64, warmup_steps=4000)
-    enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(inters_max_seq_length_enc, inters_max_seq_length_dec, 16, dec2enc_ids=False)
-    train_losses = train(transformer_relEB_C, optimizer, scheduler, inters_train_loader, epochs=8, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(inters_vocab), device=device)
-    test_loss0, accuracy0 = test(transformer_relEB_C, inters_test_loader0, inters_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(inters_vocab), device=device)
-    enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(inters_max_seq_length_enc1, inters_max_seq_length_dec1, 16, dec2enc_ids=False)
-    test_loss1, accuracy1 = test(transformer_relEB_C, inters_test_loader1, inters_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(inters_vocab), device=device)
-    enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(inters_max_seq_length_enc2, inters_max_seq_length_dec2, 16, dec2enc_ids=False)
-    test_loss2, accuracy2 = test(transformer_relEB_C, inters_test_loader2, inters_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(inters_vocab), device=device)
-    test_loss = np.mean([test_loss0, test_loss1, test_loss2])
-    accuracy = np.mean([accuracy0, accuracy1, accuracy2])
-    accuracies_inters.append(accuracy)
-
-    optimizer = torch.optim.Adam(transformer_rel2EB_C.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-    scheduler = CustomScheduler(optimizer, d_model=64, warmup_steps=4000)
-    enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(inters_max_seq_length_enc, inters_max_seq_length_dec, 16, dec2enc_ids=True)
-    train_losses = train(transformer_rel2EB_C, optimizer, scheduler, inters_train_loader, epochs=8, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(inters_vocab), device=device)
-    test_loss0, accuracy0 = test(transformer_rel2EB_C, inters_test_loader0, inters_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(inters_vocab), device=device)
-    enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(inters_max_seq_length_enc1, inters_max_seq_length_dec1, 16, dec2enc_ids=False)
-    test_loss1, accuracy1 = test(transformer_rel2EB_C, inters_test_loader1, inters_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(inters_vocab), device=device)
-    enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(inters_max_seq_length_enc2, inters_max_seq_length_dec2, 16, dec2enc_ids=True)
-    test_loss2, accuracy2 = test(transformer_rel2EB_C, inters_test_loader2, inters_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(inters_vocab), device=device)
-    test_loss = np.mean([test_loss0, test_loss1, test_loss2])
-    accuracy = np.mean([accuracy0, accuracy1, accuracy2])
-    accuracies_inters.append(accuracy)
-
-    return accuracies_add, accuracies_addNeg, accuracies_reverse, accuracies_dup, accuracies_cart, accuracies_inters
+    # Reverse dataset
+    accuracies_reverse = get_results_Table2(reverse_vocab, reverse_max_len_inp, reverse_max_len_trg, 2, reverse_train_loader, reverse_test_loader0,
+                                            reverse_test_loader1, reverse_test_loader2, repetitions=1, device=device)
     
+    # Dup dataset
+    accuracies_dup = get_results_Table2(dup_vocab, dup_max_len_inp, dup_max_len_trg, 4, dup_train_loader, dup_test_loader0,
+                                        dup_test_loader1, dup_test_loader2, repetitions=1, device=device)
+    
+    # SCAN-l dataset
+    accuracies_scanl = get_results_Table2(scanl_vocab, scanl_max_len_inp, scanl_max_len_trg, 12, scanl_train_loader, scanl_test_loader0,
+                                          scanl_test_loader1, repetitions=1, device=device) # half epochs
+    
+    # SCAN-aj dataset
+    accuracies_scanaj = get_results_Table2(scanaj_vocab, scanaj_max_len_inp, scanaj_max_len_trg, 12, scanaj_train_loader, scanaj_test_loader0,
+                                           scanaj_test_loader1, repetitions=1, device=device) # half epochs
+    
+    # PCFG-p dataset
+    accuracies_pcfgp = get_results_Table2(pcfgp_vocab, pcfgp_max_len_inp, pcfgp_max_len_trg, 12, pcfgp_train_loader, pcfgp_test_loader0,
+                                          pcfgp_test_loader1, repetitions=1, device=device) # half epochs
+    
+    # PCFG-s dataset
+    accuracies_pcfgs = get_results_Table2(pcfgs_vocab, pcfgs_max_len_inp, pcfgs_max_len_trg, 12, pcfgs_train_loader, pcfgs_test_loader0,
+                                          pcfgs_test_loader1, repetitions=1, device=device) # half epochs
+    '''
+    accuracies_addNeg = [0] * 3
+    accuracies_add = [0] * 3
+    accuracies_reverse = [0] * 3
+    accuracies_dup = [0] * 3
+    #accuracies_scanl = [0] * 6
+    accuracies_scanaj = [0] * 6
+    accuracies_pcfgp = [0] * 3
+    accuracies_pcfgs = [0] * 3
+    '''
+    return accuracies_add, accuracies_addNeg, accuracies_reverse, accuracies_dup, accuracies_scanl, accuracies_scanaj, accuracies_pcfgp, accuracies_pcfgs
 
-# Table 3
+
+def get_results_Table3(vocab, max_len_enc, max_len_dec, epochs, train_loader,
+                       test_loader, test_loader1, test_loader2=None, test_loader3=None, repetitions=1, device='cuda'):
+    accuracies_rep = []
+    for _ in range(repetitions):
+        accuracies = []
+        transformer_small4 = Transformer.ExtendedTransformer2(len(vocab), len(vocab), d=64, h=4, l=4, f=256, max_seq_length_enc=max_len_enc,
+                                                              max_seq_length_dec=max_len_dec, attention="rel2-eb").to(device)
+        transformer_small6 = Transformer.ExtendedTransformer2(len(vocab), len(vocab), d=64, h=4, l=6, f=256, max_seq_length_enc=max_len_enc,
+                                                              max_seq_length_dec=max_len_dec, attention="rel2-eb").to(device)
+        transformer_large2 = Transformer.ExtendedTransformer2(len(vocab), len(vocab), d=128, h=8, l=2, f=512, max_seq_length_enc=max_len_enc,
+                                                              max_seq_length_dec=max_len_dec, attention="rel2-eb").to(device)
+        transformer_large4 = Transformer.ExtendedTransformer2(len(vocab), len(vocab), d=128, h=8, l=4, f=512, max_seq_length_enc=max_len_enc,
+                                                              max_seq_length_dec=max_len_dec, attention="rel2-eb").to(device)
+        transformer_large6 = Transformer.ExtendedTransformer2(len(vocab), len(vocab), d=128, h=8, l=6, f=512, max_seq_length_enc=max_len_enc,
+                                                              max_seq_length_dec=max_len_dec, attention="rel2-eb").to(device)
+        transformers_small = [transformer_small4, transformer_small6]
+        transformers_large= [transformer_large2, transformer_large4, transformer_large6]
+
+        for transformer in transformers_small:
+            optimizer = ScheduledOptim(torch.optim.Adam(transformer.parameters(), lr=1e-5, betas=(0.9, 0.98), eps=1e-9), 1, 64, 4000)
+            criterion = torch.nn.NLLoss(ignore_index=0)
+            enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(max_len_enc, max_len_dec,
+                                                                                                    16, dec2enc_ids=True)
+            for epoch in range(epochs):
+                train_losses = train_step(transformer, optimizer, train_loader, epoch, criterion,
+                                          relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(vocab), clip=True, device=device)
+                print("Testing:")
+                accuracy0 = test(transformer, test_loader, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(vocab), device=device)
+                accuracy1 = test(transformer, test_loader1, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(vocab), device=device)
+                accuracy = accuracy1
+                if test_loader2 is not None:
+                    accuracy2 = test(transformer, test_loader2, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(vocab), device=device)
+                    accuracy = accuracy2
+                if test_loader3 is not None:
+                    accuracy3 = test(transformer, test_loader3, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(vocab), device=device)
+                    accuracy = accuracy3
+            accuracies.append(accuracy)
+        
+        for transformer in transformers_large:
+            optimizer = ScheduledOptim(torch.optim.Adam(transformer.parameters(), lr=1e-5, betas=(0.9, 0.98), eps=1e-9), 1, 128, 4000)
+            criterion = torch.nn.NLLLoss(ignore_index=0)
+            enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(max_len_enc, max_len_dec,
+                                                                                                     16, dec2enc_ids=True)
+            for epoch in range(epochs):
+                train_losses = train_step(transformer, optimizer, train_loader, epoch, criterion,
+                                          relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(vocab), clip=True, device=device)
+                print("Testing:")
+                accuracy0 = test(transformer, test_loader, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(vocab), device=device)
+                accuracy1 = test(transformer, test_loader1, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(vocab), device=device)
+                accuracy = accuracy1
+                if test_loader2 is not None:
+                    accuracy2 = test(transformer, test_loader2, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(vocab), device=device)
+                    accuracy = accuracy2
+                if test_loader3 is not None:
+                    accuracy3 = test(transformer, test_loader3, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(vocab), device=device)
+                    accuracy = accuracy3
+            accuracies.append(accuracy)
+        
+        accuracies_rep.append(accuracies)
+    
+    accuracies_sum = [0] * 5 # 5 is the number of different models trained in Table1 for each dataset
+    for i in range(repetitions):
+        for j in range(5):
+            accuracies_sum[j] += accuracies_rep[i][j]
+
+    accuracies_mean = [x / repetitions for x in accuracies_sum]
+
+    return accuracies_mean
+
+# Table3
 def table3(device):
-    # Add
-    accuracies_add = []
-    transformer_small4 = Transformer.ExtendedTransformer2(len(add_vocab), len(add_vocab), d=64, h=4, l=4, f=256, max_seq_length_enc=26, max_seq_length_dec=14, attention="rel2-eb").to(device)
-    transformer_small6 = Transformer.ExtendedTransformer2(len(add_vocab), len(add_vocab), d=64, h=4, l=6, f=256, max_seq_length_enc=26, max_seq_length_dec=14, attention="rel2-eb").to(device)
-    transformer_large2 = Transformer.ExtendedTransformer2(len(add_vocab), len(add_vocab), d=128, h=8, l=2, f=512, max_seq_length_enc=26, max_seq_length_dec=14, attention="rel2-eb").to(device)
-    transformer_large4 = Transformer.ExtendedTransformer2(len(add_vocab), len(add_vocab), d=128, h=8, l=4, f=512, max_seq_length_enc=26, max_seq_length_dec=14, attention="rel2-eb").to(device)
-    transformer_large6 = Transformer.ExtendedTransformer2(len(add_vocab), len(add_vocab), d=128, h=8, l=6, f=512, max_seq_length_enc=26, max_seq_length_dec=14, attention="rel2-eb").to(device)
-    transformers_small = [transformer_small4, transformer_small6]
-    transformers_large = [transformer_large2, transformer_large4, transformer_large6]
-
-    for transformer in transformers_small:
-        optimizer = torch.optim.Adam(transformer.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-        scheduler = CustomScheduler(optimizer, d_model=64, warmup_steps=4000)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(26, 14, 16, dec2enc_ids=True)
-        train_losses = train(transformer, optimizer, scheduler, add_train_loader, epochs=2, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(add_vocab), device=device)
-        test_loss, accuracy = test(transformer, add_test_loader, add_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(add_vocab), device=device)
-        accuracies_add.append(accuracy)
     
-    for transformer in transformers_large:
-        optimizer = torch.optim.Adam(transformer.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-        scheduler = CustomScheduler(optimizer, d_model=128, warmup_steps=4000)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(26, 14, 16, dec2enc_ids=True)
-        train_losses = train(transformer, optimizer, scheduler, add_train_loader, epochs=2, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(add_vocab), device=device)
-        test_loss, accuracy = test(transformer, add_test_loader, add_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(add_vocab), device=device)
-        accuracies_add.append(accuracy)
+    # Add dataset
+    accuracies_add = get_results_Table3(add_vocab, add_max_len_inp, add_max_len_trg, 2, add_train_loader, add_test_loader0,
+                                        add_test_loader1, add_test_loader2, add_test_loader3, repetitions=1, device=device)
     
-
-    # AddNeg
-    accuracies_addNeg = []
-    transformer_small4 = Transformer.ExtendedTransformer2(len(addNeg_vocab), len(addNeg_vocab), d=64, h=4, l=4, f=256, max_seq_length_enc=26, max_seq_length_dec=14, attention="rel2-eb").to(device)
-    transformer_small6 = Transformer.ExtendedTransformer2(len(addNeg_vocab), len(addNeg_vocab), d=64, h=4, l=6, f=256, max_seq_length_enc=26, max_seq_length_dec=14, attention="rel2-eb").to(device)
-    transformer_large2 = Transformer.ExtendedTransformer2(len(addNeg_vocab), len(addNeg_vocab), d=128, h=8, l=2, f=512, max_seq_length_enc=26, max_seq_length_dec=14, attention="rel2-eb").to(device)
-    transformer_large4 = Transformer.ExtendedTransformer2(len(addNeg_vocab), len(addNeg_vocab), d=128, h=8, l=4, f=512, max_seq_length_enc=26, max_seq_length_dec=14, attention="rel2-eb").to(device)
-    transformer_large6 = Transformer.ExtendedTransformer2(len(addNeg_vocab), len(addNeg_vocab), d=128, h=8, l=6, f=512, max_seq_length_enc=26, max_seq_length_dec=14, attention="rel2-eb").to(device)
-    transformers_small = [transformer_small4, transformer_small6]
-    transformers_large = [transformer_large2, transformer_large4, transformer_large6]
+    # AddNeg dataset
+    accuracies_addNeg = get_results_Table3(addNeg_vocab, addNeg_max_len_inp, addNeg_max_len_trg, 5, addNeg_train_loader, addNeg_test_loader0,
+                                           addNeg_test_loader1, addNeg_test_loader2, addNeg_test_loader3, repetitions=1, device=device)
     
-    for transformer in transformers_small:
-        optimizer = torch.optim.Adam(transformer.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-        scheduler = CustomScheduler(optimizer, d_model=64, warmup_steps=4000)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(26, 14, 16, dec2enc_ids=True)
-        train_losses = train(transformer, optimizer, scheduler, addNeg_train_loader, epochs=10, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(addNeg_vocab), device=device)
-        test_loss, accuracy = test(transformer, addNeg_test_loader, addNeg_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(addNeg_vocab), device=device)
-        accuracies_addNeg.append(accuracy)
+    # Reverse dataset
+    accuracies_reverse = get_results_Table3(reverse_vocab, reverse_max_len_inp, reverse_max_len_trg, 2, reverse_train_loader, reverse_test_loader0,
+                                            reverse_test_loader1, reverse_test_loader2, repetitions=1, device=device)
     
-    for transformer in transformers_large:
-        optimizer = torch.optim.Adam(transformer.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-        scheduler = CustomScheduler(optimizer, d_model=128, warmup_steps=4000)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(26, 14, 16, dec2enc_ids=True)
-        train_losses = train(transformer, optimizer, scheduler, addNeg_train_loader, epochs=10, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(addNeg_vocab), device=device)
-        test_loss, accuracy = test(transformer, addNeg_test_loader, addNeg_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(addNeg_vocab), device=device)
-        accuracies_addNeg.append(accuracy)
-
-
-    # Reverse
-    accuracies_reverse = []
-    transformer_small4 = Transformer.ExtendedTransformer2(len(reverse_vocab), len(reverse_vocab), d=64, h=4, l=4, f=256, max_seq_length_enc=25, max_seq_length_dec=26, attention="rel2-eb").to(device)
-    transformer_small6 = Transformer.ExtendedTransformer2(len(reverse_vocab), len(reverse_vocab), d=64, h=4, l=6, f=256, max_seq_length_enc=25, max_seq_length_dec=26, attention="rel2-eb").to(device)
-    transformer_large2 = Transformer.ExtendedTransformer2(len(reverse_vocab), len(reverse_vocab), d=128, h=8, l=2, f=512, max_seq_length_enc=25, max_seq_length_dec=26, attention="rel2-eb").to(device)
-    transformer_large4 = Transformer.ExtendedTransformer2(len(reverse_vocab), len(reverse_vocab), d=128, h=8, l=4, f=512, max_seq_length_enc=25, max_seq_length_dec=26, attention="rel2-eb").to(device)
-    transformer_large6 = Transformer.ExtendedTransformer2(len(reverse_vocab), len(reverse_vocab), d=128, h=8, l=6, f=512, max_seq_length_enc=25, max_seq_length_dec=26, attention="rel2-eb").to(device)
-    transformers_small = [transformer_small4, transformer_small6]
-    transformers_large = [transformer_large2, transformer_large4, transformer_large6]
-
-    for transformer in transformers_small:
-        optimizer = torch.optim.Adam(transformer.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-        scheduler = CustomScheduler(optimizer, d_model=64, warmup_steps=4000)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(17, 18, 16, dec2enc_ids=True)
-        train_losses = train(transformer, optimizer, scheduler, reverse_train_loader, epochs=2, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(reverse_vocab), device=device)
-        test_loss0, accuracy0 = test(transformer, reverse_test_loader0, reverse_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(reverse_vocab), device=device)
-        test_loss1, accuracy1 = test(transformer, reverse_test_loader1, reverse_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(reverse_vocab), device=device)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(25, 26, 16, dec2enc_ids=True)
-        test_loss2, accuracy2 = test(transformer, reverse_test_loader2, reverse_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(reverse_vocab), device=device)
-        test_loss = np.mean([test_loss0, test_loss1, test_loss2])
-        accuracy = np.mean([accuracy0, accuracy1, accuracy2])
-        accuracies_reverse.append(accuracy)
+    # Dup dataset
+    accuracies_dup = get_results_Table3(dup_vocab, dup_max_len_inp, dup_max_len_trg, 4, dup_train_loader, dup_test_loader0,
+                                        dup_test_loader1, dup_test_loader2, repetitions=1, device=device)
     
-    for transformer in transformers_large:
-        optimizer = torch.optim.Adam(transformer.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-        scheduler = CustomScheduler(optimizer, d_model=128, warmup_steps=4000)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(17, 18, 16, dec2enc_ids=True)
-        train_losses = train(transformer, optimizer, scheduler, reverse_train_loader, epochs=2, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(reverse_vocab), device=device)
-        test_loss0, accuracy0 = test(transformer, reverse_test_loader0,  reverse_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(reverse_vocab), device=device)
-        test_loss1, accuracy1 = test(transformer, reverse_test_loader1, reverse_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(reverse_vocab), device=device)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(25, 26, 16, dec2enc_ids=True)
-        test_loss2, accuracy2 = test(transformer, reverse_test_loader2, reverse_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(reverse_vocab), device=device)
-        test_loss = np.mean([test_loss0, test_loss1, test_loss2])
-        accuracy = np.mean([accuracy0, accuracy1, accuracy2])
-        accuracies_reverse.append(accuracy)
+    # SCAN-l dataset
+    accuracies_scanl = get_results_Table3(scanl_vocab, scanl_max_len_inp, scanl_max_len_trg, 12, scanl_train_loader, scanl_test_loader0,
+                                          scanl_test_loader1, repetitions=1, device=device)
     
-
-    # Dup
-    accuracies_dup = []
-    transformer_small4 = Transformer.ExtendedTransformer2(len(dup_vocab), len(dup_vocab), d=64, h=4, l=4, f=256, max_seq_length_enc=25, max_seq_length_dec=50, attention="rel2-eb").to(device)
-    transformer_small6 = Transformer.ExtendedTransformer2(len(dup_vocab), len(dup_vocab), d=64, h=4, l=6, f=256, max_seq_length_enc=25, max_seq_length_dec=50, attention="rel2-eb").to(device)
-    transformer_large2 = Transformer.ExtendedTransformer2(len(dup_vocab), len(dup_vocab), d=128, h=8, l=2, f=512, max_seq_length_enc=25, max_seq_length_dec=50, attention="rel2-eb").to(device)
-    transformer_large4 = Transformer.ExtendedTransformer2(len(dup_vocab), len(dup_vocab), d=128, h=8, l=4, f=512, max_seq_length_enc=25, max_seq_length_dec=50, attention="rel2-eb").to(device)
-    transformer_large6 = Transformer.ExtendedTransformer2(len(dup_vocab), len(dup_vocab), d=128, h=8, l=6, f=512, max_seq_length_enc=25, max_seq_length_dec=50, attention="rel2-eb").to(device)
-    transformers_small = [transformer_small4, transformer_small6]
-    transformers_large = [transformer_large2, transformer_large4, transformer_large6]
-
-    for transformer in transformers_small:
-        optimizer = torch.optim.Adam(transformer.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-        scheduler = CustomScheduler(optimizer, d_model=64, warmup_steps=4000)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(17, 34, 16, dec2enc_ids=True)
-        train_losses = train(transformer, optimizer, scheduler, dup_train_loader, epochs=4, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(dup_vocab), device=device)
-        test_loss0, accuracy0 = test(transformer, dup_test_loader0, dup_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(dup_vocab), device=device)
-        test_loss1, accuracy1 = test(transformer, dup_test_loader1, dup_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(dup_vocab), device=device)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(25, 50, 16, dec2enc_ids=True)
-        test_loss2, accuracy2 = test(transformer, dup_test_loader2, dup_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(dup_vocab), device=device)
-        test_loss = np.mean([test_loss0, test_loss1, test_loss2])
-        accuracy = np.mean([accuracy0, accuracy1, accuracy2])
-        accuracies_dup.append(accuracy)
+    # SCAN-aj dataset
+    accuracies_scanaj = get_results_Table3(scanaj_vocab, scanaj_max_len_inp, scanaj_max_len_trg, 12, scanaj_train_loader, scanaj_test_loader0,
+                                           scanaj_test_loader1, repetitions=1, device=device)
     
-    for transformer in transformers_large:
-        optimizer = torch.optim.Adam(transformer.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-        scheduler = CustomScheduler(optimizer, d_model=128, warmup_steps=4000)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(17, 34, 16, dec2enc_ids=True)
-        train_losses = train(transformer, optimizer, scheduler, dup_train_loader, epochs=4, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(dup_vocab), device=device)
-        test_loss0, accuracy0 = test(transformer, dup_test_loader0, dup_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(dup_vocab), device=device)
-        test_loss1, accuracy1 = test(transformer, dup_test_loader1, dup_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(dup_vocab), device=device)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(25, 50, 16, dec2enc_ids=True)
-        test_loss2, accuracy2 = test(transformer, dup_test_loader2, dup_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(dup_vocab), device=device)
-        test_loss = np.mean([test_loss0, test_loss1, test_loss2])
-        accuracy = np.mean([accuracy0, accuracy1, accuracy2])
-        accuracies_dup.append(accuracy)
+    # PCFG-p dataset
+    accuracies_pcfgp = get_results_Table3(pcfgp_vocab, pcfgp_max_len_inp, pcfgp_max_len_trg, 10, pcfgp_train_loader, pcfgp_test_loader0,
+                                          pcfgp_test_loader1, repetitions=1, device=device)
     
+    # PCFG-s dataset
+    accuracies_pcfgs = get_results_Table3(pcfgs_vocab, pcfgs_max_len_inp, pcfgs_max_len_trg, 10, pcfgs_train_loader, pcfgs_test_loader0,
+                                          pcfgs_test_loader1, repetitions= 1, device=device)
+    '''
+    accuracies_addNeg = [0] * 5
+    accuracies_add = [0] * 5
+    accuracies_reverse = [0] * 5
+    accuracies_dup = [0] * 5
+    #accuracies_scanl = [0] * 5
+    accuracies_scanaj = [0] * 5
+    accuracies_pcfgp = [0] * 5
+    accuracies_pcfgs = [0] * 5
+    '''
+    return accuracies_add, accuracies_addNeg, accuracies_reverse, accuracies_dup, accuracies_scanl, accuracies_scanaj, accuracies_pcfgp, accuracies_pcfgs
 
-    # Cart
-    accuracies_cart = []
-    transformer_small4 = Transformer.ExtendedTransformer2(len(cart_vocab), len(cart_vocab), d=64, h=4, l=4, f=256, max_seq_length_enc=cart_max_seq_length_enc2, max_seq_length_dec=cart_max_seq_length_dec2, attention="rel2-eb").to(device)
-    transformer_small6 = Transformer.ExtendedTransformer2(len(cart_vocab), len(cart_vocab), d=64, h=4, l=6, f=256, max_seq_length_enc=cart_max_seq_length_enc2, max_seq_length_dec=cart_max_seq_length_dec2, attention="rel2-eb").to(device)
-    transformer_large2 = Transformer.ExtendedTransformer2(len(cart_vocab), len(cart_vocab), d=128, h=8, l=2, f=512, max_seq_length_enc=cart_max_seq_length_enc2, max_seq_length_dec=cart_max_seq_length_dec2, attention="rel2-eb").to(device)
-    transformer_large4 = Transformer.ExtendedTransformer2(len(cart_vocab), len(cart_vocab), d=128, h=8, l=4, f=512, max_seq_length_enc=cart_max_seq_length_enc2, max_seq_length_dec=cart_max_seq_length_dec2, attention="rel2-eb").to(device)
-    transformer_large6 = Transformer.ExtendedTransformer2(len(cart_vocab), len(cart_vocab), d=128, h=8, l=6, f=512, max_seq_length_enc=cart_max_seq_length_enc2, max_seq_length_dec=cart_max_seq_length_dec2, attention="rel2-eb").to(device)
-    transformers_small = [transformer_small4, transformer_small6]
-    transformers_large = [transformer_large2, transformer_large4, transformer_large6]
 
-    for transformer in transformers_small:
-        optimizer = torch.optim.Adam(transformer.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-        scheduler = CustomScheduler(optimizer, d_model=64, warmup_steps=4000)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(cart_max_seq_length_enc, cart_max_seq_length_dec, 16, dec2enc_ids=True)
-        train_losses = train(transformer, optimizer, scheduler, cart_train_loader, epochs=4, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(cart_vocab), device=device)
-        test_loss0, accuracy0 = test(transformer, cart_test_loader0, cart_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(cart_vocab), device=device)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(cart_max_seq_length_enc1, cart_max_seq_length_dec1, 16, dec2enc_ids=False)
-        test_loss1, accuracy1 = test(transformer, cart_test_loader1, cart_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(cart_vocab), device=device)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(cart_max_seq_length_enc2, cart_max_seq_length_dec2, 16, dec2enc_ids=True)
-        test_loss2, accuracy2 = test(transformer, cart_test_loader2, cart_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(cart_vocab), device=device)
-        test_loss = np.mean([test_loss0, test_loss1, test_loss2])
-        accuracy = np.mean([accuracy0, accuracy1, accuracy2])
-        accuracies_cart.append(accuracy)
+def get_results_Table4(vocab, max_len_enc, max_len_dec, epochs, train_loader,
+                       test_loader, test_loader1, test_loader2=None, test_loader3=None, repetitions=1, device='cuda'):
+    accuracies_rep = []
+    for _ in range(repetitions):
+        accuracies = []
+        transformer_small2s = Transformer.ExtendedTransformer4(len(vocab), len(vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=max_len_enc,
+                                                               max_seq_length_dec=max_len_dec, attention= "rel2-eb", shared_weights=True).to(device)
+        transformer_small4s = Transformer.ExtendedTransformer4(len(vocab), len(vocab), d=64, h=4, l=4, f=256, max_seq_length_enc=max_len_enc,
+                                                               max_seq_length_dec=max_len_dec, attention="rel2-eb", shared_weights=True).to(device)
+        transformer_small6s = Transformer.ExtendedTransformer4(len(vocab), len(vocab), d=64, h=4, l=6, f=256, max_seq_length_enc=max_len_enc,
+                                                               max_seq_length_dec=max_len_dec, attention="rel2-eb", shared_weights=True).to(device)
+        transformer_large2s = Transformer.ExtendedTransformer4(len(vocab), len(vocab), d=128, h=8, l=2, f=512, max_seq_length_enc=max_len_enc,
+                                                               max_seq_length_dec=max_len_dec, attention="rel2-eb", shared_weights=True).to(device)
+        transformer_large4s = Transformer.ExtendedTransformer4(len(vocab), len(vocab), d=128, h=8, l=4, f=512, max_seq_length_enc=max_len_enc,
+                                                               max_seq_length_dec=max_len_dec, attention="rel2-eb", shared_weights=True).to(device)
+        transformer_large6s = Transformer.ExtendedTransformer4(len(vocab), len(vocab), d=128, h=8, l=6, f=512, max_seq_length_enc=max_len_enc,
+                                                               max_seq_length_dec=max_len_dec, attention="rel2-eb", shared_weights=True).to(device)
+        transformers_small = [transformer_small2s, transformer_small4s, transformer_small6s]
+        transformers_large = [transformer_large2s, transformer_large4s, transformer_large6s]
 
-    for transformer in transformers_large:
-        optimizer = torch.optim.Adam(transformer.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-        scheduler = CustomScheduler(optimizer, d_model=128, warmup_steps=4000)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(cart_max_seq_length_enc, cart_max_seq_length_dec, 16, dec2enc_ids=True)
-        train_losses = train(transformer, optimizer, scheduler, cart_train_loader, epochs=4, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(cart_vocab), device=device)
-        test_loss0, accuracy0 = test(transformer, cart_test_loader0, cart_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(cart_vocab), device=device)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(cart_max_seq_length_enc1, cart_max_seq_length_dec1, 16, dec2enc_ids=False)
-        test_loss1, accuracy1 = test(transformer, cart_test_loader1, cart_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(cart_vocab), device=device)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(cart_max_seq_length_enc2, cart_max_seq_length_dec2, 16, dec2enc_ids=True)
-        test_loss2, accuracy2 = test(transformer, cart_test_loader2, cart_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(cart_vocab), device=device)
-        test_loss = np.mean([test_loss0, test_loss1, test_loss2])
-        accuracy = np.mean([accuracy0, accuracy1, accuracy2])
-        accuracies_cart.append(accuracy)
+        for transformer in transformers_small:
+            optimizer = ScheduledOptim(torch.optim.Adam(transformer.parameters(), lr=1e-5, betas=(0.9, 0.98), eps=1e-9), 1, 64, 4000)
+            criterion = torch.nn.NLLLoss(ignore_index=0)
+            enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(max_len_enc, max_len_dec,
+                                                                                                    16, dec2enc_ids=True)
+            for epoch in range(epochs):
+                train_losses = train_step(transformer, optimizer, train_loader, epoch, criterion,
+                                          relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(vocab), clip=True, device=device)
+                print("Testing:")
+                accuracy0 = test(transformer, test_loader, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(vocab), device=device)
+                accuracy1 = test(transformer, test_loader1, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(vocab), device=device)
+                accuracy = accuracy1
+                if test_loader2 is not None:
+                    accuracy2 = test(transformer, test_loader2, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(vocab), device=device)
+                    accuracy = accuracy2
+                if test_loader3 is not None:
+                    accuracy3 = test(transformer, test_loader3, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(vocab), device=device)
+                    accuracy = accuracy3
+            accuracies.append(accuracy)
+        
+        for transformer in transformers_large:
+            optimizer = ScheduledOptim(torch.optim.Adam(transformer.parameters(), lr=1e-5, betas=(0.9, 0.98), eps=1e-9), 1, 128, 4000)
+            criterion = torch.nn.NLLLoss(ignore_index=0)
+            enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(max_len_enc, max_len_dec,
+                                                                                                     16, dec2enc_ids=True)
+            for epoch in range(epochs):
+                train_losses = train_step(transformer, optimizer, train_loader, epoch, criterion,
+                                          relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(vocab), clip=True, device=device)
+                print("Testing:")
+                accuracy0 = test(transformer, test_loader, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(vocab), device=device)
+                accuracy1 = test(transformer, test_loader1, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(vocab), device=device)
+                accuracy = accuracy1
+                if test_loader2 is not None:
+                    accuracy2 = test(transformer, test_loader2, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(vocab), device=device)
+                    accuracy = accuracy2
+                if test_loader3 is not None:
+                    accuracy3 = test(transformer, test_loader3, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(vocab), device=device)
+                    accuracy = accuracy3
+            accuracies.append(accuracy)
+        
+        accuracies_rep.append(accuracies)
     
+    accuracies_sum = [0] * 6 # 6 is the number of different models trained in Table1 for each dataset
+    for i in range(repetitions):
+        for j in range(6):
+            accuracies_sum[j] += accuracies_rep[i][j]
 
-    # Inters
-    accuracies_inters = []
-    transformer_small4 = Transformer.ExtendedTransformer2(len(inters_vocab), len(inters_vocab), d=64, h=4, l=4, f=256, max_seq_length_enc=inters_max_seq_length_enc2, max_seq_length_dec=inters_max_seq_length_dec2, attention="rel2-eb").to(device)
-    transformer_small6 = Transformer.ExtendedTransformer2(len(inters_vocab), len(inters_vocab), d=64, h=4, l=6, f=256, max_seq_length_enc=inters_max_seq_length_enc2, max_seq_length_dec=inters_max_seq_length_dec2, attention="rel2-eb").to(device)
-    transformer_large2 = Transformer.ExtendedTransformer2(len(inters_vocab), len(inters_vocab), d=128, h=8, l=2, f=512, max_seq_length_enc=inters_max_seq_length_enc2, max_seq_length_dec=inters_max_seq_length_dec2, attention="rel2-eb").to(device)
-    transformer_large4 = Transformer.ExtendedTransformer2(len(inters_vocab), len(inters_vocab), d=128, h=8, l=4, f=512, max_seq_length_enc=inters_max_seq_length_enc2, max_seq_length_dec=inters_max_seq_length_dec2, attention="rel2-eb").to(device)
-    transformer_large6 = Transformer.ExtendedTransformer2(len(inters_vocab), len(inters_vocab), d=128, h=8, l=6, f=512, max_seq_length_enc=inters_max_seq_length_enc2, max_seq_length_dec=inters_max_seq_length_dec2, attention="rel2-eb").to(device)
-    transformers_small = [transformer_small4, transformer_small6]
-    transformers_large = [transformer_large2, transformer_large4, transformer_large6]
+    accuracies_mean = [x / repetitions for x in accuracies_sum]
 
-    for transformer in transformers_small:
-        optimizer = torch.optim.Adam(transformer.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-        scheduler = CustomScheduler(optimizer, d_model=64, warmup_steps=4000)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(inters_max_seq_length_enc, inters_max_seq_length_dec, 16, dec2enc_ids=True)
-        train_losses = train(transformer, optimizer, scheduler, inters_train_loader, epochs=8, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(inters_vocab), device=device)
-        test_loss0, accuracy0 = test(transformer, inters_test_loader0, inters_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(inters_vocab), device=device)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(inters_max_seq_length_enc1, inters_max_seq_length_dec1, 16, dec2enc_ids=False)
-        test_loss1, accuracy1 = test(transformer, inters_test_loader1, inters_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(inters_vocab), device=device)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(inters_max_seq_length_enc2, inters_max_seq_length_dec2, 16, dec2enc_ids=True)
-        test_loss2, accuracy2 = test(transformer, inters_test_loader2, inters_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(inters_vocab), device=device)
-        test_loss = np.mean([test_loss0, test_loss1, test_loss2])
-        accuracy = np.mean([accuracy0, accuracy1, accuracy2])
-        accuracies_inters.append(accuracy)
-    
-    for transformer in transformers_large:
-        optimizer = torch.optim.Adam(transformer.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-        scheduler = CustomScheduler(optimizer, d_model=128, warmup_steps=4000)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(inters_max_seq_length_enc, inters_max_seq_length_dec, 16, dec2enc_ids=True)
-        train_losses = train(transformer, optimizer, scheduler, inters_train_loader, epochs=8, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(inters_vocab), device=device)
-        test_loss0, accuracy0 = test(transformer, inters_test_loader0, inters_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(inters_vocab), device=device)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(inters_max_seq_length_enc1, inters_max_seq_length_dec1, 16, dec2enc_ids=False)
-        test_loss1, accuracy1 = test(transformer, inters_test_loader1, inters_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(inters_vocab), device=device)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(inters_max_seq_length_enc2, inters_max_seq_length_dec2, 16, dec2enc_ids=True)
-        test_loss2, accuracy2 = test(transformer, inters_test_loader2, inters_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(inters_vocab), device=device)
-        test_loss = np.mean([test_loss0, test_loss1, test_loss2])
-        accuracy = np.mean([accuracy0, accuracy1, accuracy2])
-        accuracies_inters.append(accuracy)
-    
-    return accuracies_add, accuracies_addNeg, accuracies_reverse, accuracies_dup, accuracies_cart, accuracies_inters
+    return accuracies_mean
 
-
-# Table 4
+# Table4
 def table4(device):
-    # Add
-    accuracies_add = []
-    transformer_small2s = Transformer.ExtendedTransformer4(len(add_vocab), len(add_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=26, max_seq_length_dec=14, attention="rel2-eb").to(device)
-    transformer_small4s = Transformer.ExtendedTransformer4(len(add_vocab), len(add_vocab), d=64, h=4, l=4, f=256, max_seq_length_enc=26, max_seq_length_dec=14, attention="rel2-eb").to(device)
-    transformer_small6s = Transformer.ExtendedTransformer4(len(add_vocab), len(add_vocab), d=64, h=4, l=6, f=256, max_seq_length_enc=26, max_seq_length_dec=14, attention="rel2-eb").to(device)
-    transformer_large2s = Transformer.ExtendedTransformer4(len(add_vocab), len(add_vocab), d=128, h=8, l=2, f=512, max_seq_length_enc=26, max_seq_length_dec=14, attention="rel2-eb").to(device)
-    transformer_large4s = Transformer.ExtendedTransformer4(len(add_vocab), len(add_vocab), d=128, h=8, l=4, f=512, max_seq_length_enc=26, max_seq_length_dec=14, attention="rel2-eb").to(device)
-    transformer_large6s = Transformer.ExtendedTransformer4(len(add_vocab), len(add_vocab), d=128, h=8, l=6, f=512, max_seq_length_enc=26, max_seq_length_dec=14, attention="rel2-eb").to(device)
-    transformers_small = [transformer_small2s, transformer_small4s, transformer_small6s]
-    transformers_large = [transformer_large2s, transformer_large4s, transformer_large6s]
-
-    for transformer in transformers_small:
-        optimizer = torch.optim.Adam(transformer.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-        scheduler = CustomScheduler(optimizer, d_model=64, warmup_steps=4000)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(26, 14, 16, dec2enc_ids=True)
-        train_losses = train(transformer, optimizer, scheduler, add_train_loader, epochs=2, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(add_vocab), device=device)
-        test_loss, accuracy = test(transformer, add_test_loader, add_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(add_vocab), device=device)
-        accuracies_add.append(accuracy)
     
-    for transformer in transformers_large:
-        optimizer = torch.optim.Adam(transformer.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-        scheduler = CustomScheduler(optimizer, d_model=128, warmup_steps=4000)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(26, 14, 16, dec2enc_ids=True)
-        train_losses = train(transformer, optimizer, scheduler, add_train_loader, epochs=2, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(add_vocab), device=device)
-        test_loss, accuracy = test(transformer, add_test_loader, add_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(add_vocab), device=device)
-        accuracies_add.append(accuracy)
+    # Add dataset
+    accuracies_add = get_results_Table4(add_vocab, add_max_len_inp, add_max_len_trg, 2, add_train_loader, add_test_loader0,
+                                        add_test_loader1, add_test_loader2, add_test_loader3, repetitions=1, device=device)
     
-
-    # AddNeg
-    accuracies_addNeg = []
-    transformer_small2s = Transformer.ExtendedTransformer4(len(addNeg_vocab), len(addNeg_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=26, max_seq_length_dec=14, attention="rel2-eb").to(device)
-    transformer_small4s = Transformer.ExtendedTransformer4(len(addNeg_vocab), len(addNeg_vocab), d=64, h=4, l=4, f=256, max_seq_length_enc=26, max_seq_length_dec=14, attention="rel2-eb").to(device)
-    transformer_small6s = Transformer.ExtendedTransformer4(len(addNeg_vocab), len(addNeg_vocab), d=64, h=4, l=6, f=256, max_seq_length_enc=26, max_seq_length_dec=14, attention="rel2-eb").to(device)
-    transformer_large2s = Transformer.ExtendedTransformer4(len(addNeg_vocab), len(addNeg_vocab), d=128, h=8, l=2, f=512, max_seq_length_enc=26, max_seq_length_dec=14, attention="rel2-eb").to(device)
-    transformer_large4s = Transformer.ExtendedTransformer4(len(addNeg_vocab), len(addNeg_vocab), d=128, h=8, l=4, f=512, max_seq_length_enc=26, max_seq_length_dec=14, attention="rel2-eb").to(device)
-    transformer_large6s = Transformer.ExtendedTransformer4(len(addNeg_vocab), len(addNeg_vocab), d=128, h=8, l=6, f=512, max_seq_length_enc=26, max_seq_length_dec=14, attention="rel2-eb").to(device)
-    transformers_small = [transformer_small2s, transformer_small4s, transformer_small6s]
-    transformers_large = [transformer_large2s, transformer_large4s, transformer_large6s]
+    # AddNeg dataset
+    accuracies_addNeg = get_results_Table3(addNeg_vocab, addNeg_max_len_inp, addNeg_max_len_trg, 5, addNeg_train_loader, addNeg_test_loader0,
+                                           addNeg_test_loader1, addNeg_test_loader2, addNeg_test_loader3, repetitions=5, device=device)
     
-    for transformer in transformers_small:
-        optimizer = torch.optim.Adam(transformer.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-        scheduler = CustomScheduler(optimizer, d_model=64, warmup_steps=4000)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(26, 14, 16, dec2enc_ids=True)
-        train_losses = train(transformer, optimizer, scheduler, addNeg_train_loader, epochs=10, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(addNeg_vocab), device=device)
-        test_loss, accuracy = test(transformer, addNeg_test_loader, addNeg_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(addNeg_vocab), device=device)
-        accuracies_addNeg.append(accuracy)
+    # Reverse dataset
+    accuracies_reverse = get_results_Table3(reverse_vocab, reverse_max_len_inp, reverse_max_len_trg, 2, reverse_train_loader, reverse_test_loader0,
+                                            reverse_test_loader1, reverse_test_loader2, repetitions=1, device=device)
     
-    for transformer in transformers_large:
-        optimizer = torch.optim.Adam(transformer.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-        scheduler = CustomScheduler(optimizer, d_model=128, warmup_steps=4000)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(26, 14, 16, dec2enc_ids=True)
-        train_losses = train(transformer, optimizer, scheduler, addNeg_train_loader, epochs=10, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(addNeg_vocab), device=device)
-        test_loss, accuracy = test(transformer, addNeg_test_loader, addNeg_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(addNeg_vocab), device=device)
-        accuracies_addNeg.append(accuracy)
-
-
-    # Reverse
-    accuracies_reverse = []
-    transformer_small2s = Transformer.ExtendedTransformer4(len(reverse_vocab), len(reverse_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=25, max_seq_length_dec=26, attention="rel2-eb").to(device)
-    transformer_small4s = Transformer.ExtendedTransformer4(len(reverse_vocab), len(reverse_vocab), d=64, h=4, l=4, f=256, max_seq_length_enc=25, max_seq_length_dec=26, attention="rel2-eb").to(device)
-    transformer_small6s = Transformer.ExtendedTransformer4(len(reverse_vocab), len(reverse_vocab), d=64, h=4, l=6, f=256, max_seq_length_enc=25, max_seq_length_dec=26, attention="rel2-eb").to(device)
-    transformer_large2s = Transformer.ExtendedTransformer4(len(reverse_vocab), len(reverse_vocab), d=128, h=8, l=2, f=512, max_seq_length_enc=25, max_seq_length_dec=26, attention="rel2-eb").to(device)
-    transformer_large4s = Transformer.ExtendedTransformer4(len(reverse_vocab), len(reverse_vocab), d=128, h=8, l=4, f=512, max_seq_length_enc=25, max_seq_length_dec=26, attention="rel2-eb").to(device)
-    transformer_large6s = Transformer.ExtendedTransformer4(len(reverse_vocab), len(reverse_vocab), d=128, h=8, l=6, f=512, max_seq_length_enc=25, max_seq_length_dec=26, attention="rel2-eb").to(device)
-    transformers_small = [transformer_small2s, transformer_small4s, transformer_small6s]
-    transformers_large = [transformer_large2s, transformer_large4s, transformer_large6s]
-
-    for transformer in transformers_small:
-        optimizer = torch.optim.Adam(transformer.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-        scheduler = CustomScheduler(optimizer, d_model=64, warmup_steps=4000)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(17, 18, 16, dec2enc_ids=True)
-        train_losses = train(transformer, optimizer, scheduler, reverse_train_loader, epochs=2, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(reverse_vocab), device=device)
-        test_loss0, accuracy0 = test(transformer, reverse_test_loader0, reverse_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(reverse_vocab), device=device)
-        test_loss1, accuracy1 = test(transformer, reverse_test_loader1, reverse_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(reverse_vocab), device=device)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(25, 26, 16, dec2enc_ids=True)
-        test_loss2, accuracy2 = test(transformer, reverse_test_loader2, reverse_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(reverse_vocab), device=device)
-        test_loss = np.mean([test_loss0, test_loss1, test_loss2])
-        accuracy = np.mean([accuracy0, accuracy1, accuracy2])
-        accuracies_reverse.append(accuracy)
+    # Dup dataset
+    accuracies_dup = get_results_Table3(dup_vocab, dup_max_len_inp, dup_max_len_trg, 4, dup_train_loader, dup_test_loader0,
+                                        dup_test_loader1, dup_test_loader2, repetitions=1, device=device)
     
-    for transformer in transformers_large:
-        optimizer = torch.optim.Adam(transformer.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-        scheduler = CustomScheduler(optimizer, d_model=128, warmup_steps=4000)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(17, 18, 16, dec2enc_ids=True)
-        train_losses = train(transformer, optimizer, scheduler, reverse_train_loader, epochs=2, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(reverse_vocab), device=device)
-        test_loss0, accuracy0 = test(transformer, reverse_test_loader0, reverse_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(reverse_vocab), device=device)
-        test_loss1, accuracy1 = test(transformer, reverse_test_loader1, reverse_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(reverse_vocab), device=device)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(25, 26, 16, dec2enc_ids=True)
-        test_loss2, accuracy2 = test(transformer, reverse_test_loader2, reverse_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(reverse_vocab), device=device)
-        test_loss = np.mean([test_loss0, test_loss1, test_loss2])
-        accuracy = np.mean([accuracy0, accuracy1, accuracy2])
-        accuracies_reverse.append(accuracy)
+    # SCAN-l dataset
+    accuracies_scanl = get_results_Table4(scanl_vocab, scanl_max_len_inp, scanl_max_len_trg, 12, scanl_train_loader, scanl_test_loader0,
+                                          scanl_test_loader1, repetitions=1, device=device)
     
-
-    # Dup
-    accuracies_dup = []
-    transformer_small2s = Transformer.ExtendedTransformer4(len(dup_vocab), len(dup_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=25, max_seq_length_dec=50, attention="rel2-eb").to(device)
-    transformer_small4s = Transformer.ExtendedTransformer4(len(dup_vocab), len(dup_vocab), d=64, h=4, l=4, f=256, max_seq_length_enc=25, max_seq_length_dec=50, attention="rel2-eb").to(device)
-    transformer_small6s = Transformer.ExtendedTransformer4(len(dup_vocab), len(dup_vocab), d=64, h=4, l=6, f=256, max_seq_length_enc=25, max_seq_length_dec=50, attention="rel2-eb").to(device)
-    transformer_large2s = Transformer.ExtendedTransformer4(len(dup_vocab), len(dup_vocab), d=128, h=8, l=2, f=512, max_seq_length_enc=25, max_seq_length_dec=50, attention="rel2-eb").to(device)
-    transformer_large4s = Transformer.ExtendedTransformer4(len(dup_vocab), len(dup_vocab), d=128, h=8, l=4, f=512, max_seq_length_enc=25, max_seq_length_dec=50, attention="rel2-eb").to(device)
-    transformer_large6s = Transformer.ExtendedTransformer4(len(dup_vocab), len(dup_vocab), d=128, h=8, l=6, f=512, max_seq_length_enc=25, max_seq_length_dec=50, attention="rel2-eb").to(device)
-    transformers_small = [transformer_small2s, transformer_small4s, transformer_small6s]
-    transformers_large = [transformer_large2s, transformer_large4s, transformer_large6s]
-
-    for transformer in transformers_small:
-        optimizer = torch.optim.Adam(transformer.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-        scheduler = CustomScheduler(optimizer, d_model=64, warmup_steps=4000)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(17, 34, 16, dec2enc_ids=True)
-        train_losses = train(transformer, optimizer, scheduler, dup_train_loader, epochs=4, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(dup_vocab), device=device)
-        test_loss0, accuracy0 = test(transformer, dup_test_loader0, dup_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(dup_vocab), device=device)
-        test_loss1, accuracy1 = test(transformer, dup_test_loader1, dup_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(dup_vocab), device=device)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(25, 50, 16, dec2enc_ids=True)
-        test_loss2, accuracy2 = test(transformer, dup_test_loader2, dup_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(dup_vocab), device=device)
-        test_loss = np.mean([test_loss0, test_loss1, test_loss2])
-        accuracy = np.mean([accuracy0, accuracy1, accuracy2])
-        accuracies_dup.append(accuracy)
+    # SCAN-aj dataset
+    accuracies_scanaj = get_results_Table4(scanaj_vocab, scanaj_max_len_inp, scanaj_max_len_trg, 212, scanaj_train_loader, scanaj_test_loader0,
+                                           scanaj_test_loader1, repetitions=1, device=device)
     
-    for transformer in transformers_large:
-        optimizer = torch.optim.Adam(transformer.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-        scheduler = CustomScheduler(optimizer, d_model=128, warmup_steps=4000)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(17, 34, 16, dec2enc_ids=True)
-        train_losses = train(transformer, optimizer, scheduler, dup_train_loader, epochs=4, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(dup_vocab), device=device)
-        test_loss0, accuracy0 = test(transformer, dup_test_loader0, dup_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(dup_vocab), device=device)
-        test_loss1, accuracy1 = test(transformer, dup_test_loader1, dup_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(dup_vocab), device=device)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(25, 50, 16, dec2enc_ids=True)
-        test_loss2, accuracy2 = test(transformer, dup_test_loader2, dup_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(dup_vocab), device=device)
-        test_loss = np.mean([test_loss0, test_loss1, test_loss2])
-        accuracy = np.mean([accuracy0, accuracy1, accuracy2])
-        accuracies_dup.append(accuracy)
+    # PCFG-p dataset
+    accuracies_pcfgp = get_results_Table3(pcfgp_vocab, pcfgp_max_len_inp, pcfgp_max_len_trg, 10, pcfgp_train_loader, pcfgp_test_loader0,
+                                          pcfgp_test_loader1, repetitions=1, device=device)
     
+    # PCFG-s dataset
+    accuracies_pcfgs = get_results_Table3(pcfgs_vocab, pcfgs_max_len_inp, pcfgs_max_len_trg, 10, pcfgs_train_loader, pcfgs_test_loader0,
+                                          pcfgs_test_loader1, repetitions=1, device=device)
+    '''
+    accuracies_addNeg = [0] * 6
+    accuracies_add = [0] * 6
+    accuracies_reverse = [0] * 6
+    accuracies_dup = [0] * 6
+    #accuracies_scanl = [0] * 6
+    accuracies_scanaj = [0] * 6
+    accuracies_pcfgp = [0] * 6
+    accuracies_pcfgs = [0] * 6
+    '''
+    return accuracies_add, accuracies_addNeg, accuracies_reverse, accuracies_dup, accuracies_scanl, accuracies_scanaj, accuracies_pcfgp, accuracies_pcfgs
 
-    # Cart
-    accuracies_cart = []
-    transformer_small2s = Transformer.ExtendedTransformer4(len(cart_vocab), len(cart_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=cart_max_seq_length_enc2, max_seq_length_dec=cart_max_seq_length_dec2, attention="rel2-eb").to(device)
-    transformer_small4s = Transformer.ExtendedTransformer4(len(cart_vocab), len(cart_vocab), d=64, h=4, l=4, f=256, max_seq_length_enc=cart_max_seq_length_enc2, max_seq_length_dec=cart_max_seq_length_dec2, attention="rel2-eb").to(device)
-    transformer_small6s = Transformer.ExtendedTransformer4(len(cart_vocab), len(cart_vocab), d=64, h=4, l=6, f=256, max_seq_length_enc=cart_max_seq_length_enc2, max_seq_length_dec=cart_max_seq_length_dec2, attention="rel2-eb").to(device)
-    transformer_large2s = Transformer.ExtendedTransformer4(len(cart_vocab), len(cart_vocab), d=128, h=8, l=2, f=512, max_seq_length_enc=cart_max_seq_length_enc2, max_seq_length_dec=cart_max_seq_length_dec2, attention="rel2-eb").to(device)
-    transformer_large4s = Transformer.ExtendedTransformer4(len(cart_vocab), len(cart_vocab), d=128, h=8, l=4, f=512, max_seq_length_enc=cart_max_seq_length_enc2, max_seq_length_dec=cart_max_seq_length_dec2, attention="rel2-eb").to(device)
-    transformer_large6s = Transformer.ExtendedTransformer4(len(cart_vocab), len(cart_vocab), d=128, h=8, l=6, f=512, max_seq_length_enc=cart_max_seq_length_enc2, max_seq_length_dec=cart_max_seq_length_dec2, attention="rel2-eb").to(device)
-    transformers_small = [transformer_small2s, transformer_small4s, transformer_small6s]
-    transformers_large = [transformer_large2s, transformer_large4s, transformer_large6s]
 
-    for transformer in transformers_small:
-        optimizer = torch.optim.Adam(transformer.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-        scheduler = CustomScheduler(optimizer, d_model=64, warmup_steps=4000)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(cart_max_seq_length_enc, cart_max_seq_length_dec, 16, dec2enc_ids=True)
-        train_losses = train(transformer, optimizer, scheduler, cart_train_loader, epochs=4, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(cart_vocab), device=device)
-        test_loss0, accuracy0 = test(transformer, cart_test_loader0, cart_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(cart_vocab), device=device)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(cart_max_seq_length_enc1, cart_max_seq_length_dec1, 16, dec2enc_ids=False)
-        test_loss1, accuracy1 = test(transformer, cart_test_loader1, cart_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(cart_vocab), device=device)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(cart_max_seq_length_enc2, cart_max_seq_length_dec2, 16, dec2enc_ids=True)
-        test_loss2, accuracy2 = test(transformer, cart_test_loader2, cart_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(cart_vocab), device=device)
-        test_loss = np.mean([test_loss0, test_loss1, test_loss2])
-        accuracy = np.mean([accuracy0, accuracy1, accuracy2])
-        accuracies_cart.append(accuracy)
-
-    for transformer in transformers_large:
-        optimizer = torch.optim.Adam(transformer.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-        scheduler = CustomScheduler(optimizer, d_model=128, warmup_steps=4000)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(cart_max_seq_length_enc, cart_max_seq_length_dec, 16, dec2enc_ids=True)
-        train_losses = train(transformer, optimizer, scheduler, cart_train_loader, epochs=4, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(cart_vocab), device=device)
-        test_loss0, accuracy0 = test(transformer, cart_test_loader0, cart_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(cart_vocab), device=device)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(cart_max_seq_length_enc1, cart_max_seq_length_dec1, 16, dec2enc_ids=False)
-        test_loss1, accuracy1 = test(transformer, cart_test_loader1, cart_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(cart_vocab), device=device)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(cart_max_seq_length_enc2, cart_max_seq_length_dec2, 16, dec2enc_ids=True)
-        test_loss2, accuracy2 = test(transformer, cart_test_loader2, cart_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(cart_vocab), device=device)
-        test_loss = np.mean([test_loss0, test_loss1, test_loss2])
-        accuracy = np.mean([accuracy0, accuracy1, accuracy2])
-        accuracies_cart.append(accuracy)
-    
-
-    # Inters
-    accuracies_inters = []
-    transformer_small2s = Transformer.ExtendedTransformer4(len(inters_vocab), len(inters_vocab), d=64, h=4, l=2, f=256, max_seq_length_enc=inters_max_seq_length_enc2, max_seq_length_dec=inters_max_seq_length_dec2, attention="rel2-eb").to(device)
-    transformer_small4s = Transformer.ExtendedTransformer4(len(inters_vocab), len(inters_vocab), d=64, h=4, l=4, f=256, max_seq_length_enc=inters_max_seq_length_enc2, max_seq_length_dec=inters_max_seq_length_dec2, attention="rel2-eb").to(device)
-    transformer_small6s = Transformer.ExtendedTransformer4(len(inters_vocab), len(inters_vocab), d=64, h=4, l=6, f=256, max_seq_length_enc=inters_max_seq_length_enc2, max_seq_length_dec=inters_max_seq_length_dec2, attention="rel2-eb").to(device)
-    transformer_large2s = Transformer.ExtendedTransformer4(len(inters_vocab), len(inters_vocab), d=128, h=8, l=2, f=512, max_seq_length_enc=inters_max_seq_length_enc2, max_seq_length_dec=inters_max_seq_length_dec2, attention="rel2-eb").to(device)
-    transformer_large4s = Transformer.ExtendedTransformer4(len(inters_vocab), len(inters_vocab), d=128, h=8, l=4, f=512, max_seq_length_enc=inters_max_seq_length_enc2, max_seq_length_dec=inters_max_seq_length_dec2, attention="rel2-eb").to(device)
-    transformer_large6s = Transformer.ExtendedTransformer4(len(inters_vocab), len(inters_vocab), d=128, h=8, l=6, f=512, max_seq_length_enc=inters_max_seq_length_enc2, max_seq_length_dec=inters_max_seq_length_dec2, attention="rel2-eb").to(device)
-    transformers_small = [transformer_small2s, transformer_small4s, transformer_small6s]
-    transformers_large = [transformer_large2s, transformer_large4s, transformer_large6s]
-
-    for transformer in transformers_small:
-        optimizer = torch.optim.Adam(transformer.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-        scheduler = CustomScheduler(optimizer, d_model=64, warmup_steps=4000)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(inters_max_seq_length_enc, inters_max_seq_length_dec, 16, dec2enc_ids=True)
-        train_losses = train(transformer, optimizer, scheduler, inters_train_loader, epochs=8, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(inters_vocab), device=device)
-        test_loss0, accuracy0 = test(transformer, inters_test_loader0, inters_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(inters_vocab), device=device)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(inters_max_seq_length_enc1, inters_max_seq_length_dec1, 16, dec2enc_ids=False)
-        test_loss1, accuracy1 = test(transformer, inters_test_loader1, inters_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(inters_vocab), device=device)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(inters_max_seq_length_enc2, inters_max_seq_length_dec2, 16, dec2enc_ids=True)
-        test_loss2, accuracy2 = test(transformer, inters_test_loader2, inters_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(inters_vocab), device=device)
-        test_loss = np.mean([test_loss0, test_loss1, test_loss2])
-        accuracy = np.mean([accuracy0, accuracy1, accuracy2])
-        accuracies_inters.append(accuracy)
-    
-    for transformer in transformers_large:
-        optimizer = torch.optim.Adam(transformer.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-        scheduler = CustomScheduler(optimizer, d_model=128, warmup_steps=4000)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(inters_max_seq_length_enc, inters_max_seq_length_dec, 16, dec2enc_ids=True)
-        train_losses = train(transformer, optimizer, scheduler, inters_train_loader, epochs=8, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(inters_vocab), device=device)
-        test_loss0, accuracy0 = test(transformer, inters_test_loader0, inters_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(inters_vocab), device=device)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(inters_max_seq_length_enc1, inters_max_seq_length_dec1, 16, dec2enc_ids=False)
-        test_loss1, accuracy1 = test(transformer, inters_test_loader1, inters_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(inters_vocab), device=device)
-        enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(inters_max_seq_length_enc2, inters_max_seq_length_dec2, 16, dec2enc_ids=True)
-        test_loss2, accuracy2 = test(transformer, inters_test_loader2, inters_vocab, relative_ids=(enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), src_vocab_size=len(inters_vocab), device=device)
-        test_loss = np.mean([test_loss0, test_loss1, test_loss2])
-        accuracy = np.mean([accuracy0, accuracy1, accuracy2])
-        accuracies_inters.append(accuracy)
-    
-    return accuracies_add, accuracies_addNeg, accuracies_reverse, accuracies_dup, accuracies_cart, accuracies_inters
-'''
 
 def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    
-    accuracies_add1, accuracies_addNeg1, accuracies_reverse1, accuracies_dup1 = table1(device)
+    '''
+    accuracies_add1, accuracies_addNeg1, accuracies_reverse1, accuracies_dup1, accuracies_scanl1, accuracies_scanaj1, accuracies_pcfgp1, accuracies_pcfgs1 = table1(device)
     print(f"Table1, Add dataset accuracies: {accuracies_add1}, \nAddNeg dataset accuracies: {accuracies_addNeg1},")
-    print(f"Accuracies Reverse dataset: {accuracies_reverse1}, \nAccuracies Dup dataset: {accuracies_dup1}")
-    #accuracies_add1, accuracies_addNeg1, accuracies_reverse1, accuracies_dup1, accuracies_cart1, accuracies_inters1 = table1(device)
-    #accuracies_add2, accuracies_addNeg2, accuracies_reverse2, accuracies_dup2, accuracies_cart2, accuracies_inters2 = table2(device)
-    #accuracies_add3, accuracies_addNeg3, accuracies_reverse3, accuracies_dup3, accuracies_cart3, accuracies_inters3 = table3(device)
-    #accuracies_add4, accuracies_addNeg4, accuracies_reverse4, accuracies_dup4, accuracies_cart4, accuracies_inters4 = table4(device)
+    print(f"Accuracies Reverse dataset: {accuracies_reverse1}, \nAccuracies Dup dataset: {accuracies_dup1},")
+    print(f"Accuracis SCAN-l dataset: {accuracies_scanl1}, \nAccuracies SCAN-aj dataset: {accuracies_scanaj1},")
+    print(f"Accuracies PCFG-p dataset: {accuracies_pcfgp1}, \nAccuracies PCFG-s dataset: {accuracies_pcfgs1}")
     
-    #print(f"Table 1, Add dataset accuracies: {accuracies_add1},\nAddNeg dataset accuracies: {accuracies_addNeg1},\nReverse dataset accuracies: {accuracies_reverse1},\nDup dataset accuracies: {accuracies_dup1},\nCart dataset accuracies: {accuracies_cart1},\nInters dataset accuracies: {accuracies_inters1}")
-    #print(f"Table 2, Add dataset accuracies: {accuracies_add2},\nAddNeg dataset accuracies: {accuracies_addNeg2},\nReverse dataset accuracies: {accuracies_reverse2},\nDup dataset accuracies: {accuracies_dup2},\nCart dataset accuracies: {accuracies_cart2},\nInters dataset accuracies: {accuracies_inters2}")
-    #print(f"Table 3, Add dataset accuracies: {accuracies_add3},\nAddNeg dataset accuracies: {accuracies_addNeg3},\nReverse dataset accuracies: {accuracies_reverse3},\nDup dataset accuracies: {accuracies_dup3},\nCart dataset accuracies: {accuracies_cart3},\nInters dataset accuracies: {accuracies_inters3}")
-    #print(f"Table 4, Add dataset accuracies: {accuracies_add4},\nAddNeg dataset accuracies: {accuracies_addNeg4},\nReverse dataset accuracies: {accuracies_reverse4},\nDup dataset accuracies: {accuracies_dup4},\nCart dataset accuracies: {accuracies_cart4},\nInters dataset accuracies: {accuracies_inters4}")
+    accuracies_add2, accuracies_addNeg2, accuracies_reverse2, accuracies_dup2, accuracies_scanl2, accuracies_scanaj2, accuracies_pcfgp2, accuracies_pcfgs2 = table2(device)
+    print(f"Table2, Add dataset accuracies: {accuracies_add2}, \nAddNeg dataset accuracies: {accuracies_addNeg2},")
+    print(f"Accuracies Reverse dataset: {accuracies_reverse2}, \nAccuracies Dup dataset: {accuracies_dup2},")
+    print(f"Accuracis SCAN-l dataset: {accuracies_scanl2}, \nAccuracies SCAN-aj dataset: {accuracies_scanaj2},")
+    print(f"Accuracies PCFG-p dataset: {accuracies_pcfgp2}, \nAccuracies PCFG-s dataset: {accuracies_pcfgs2}")
+    '''
+    accuracies_add3, accuracies_addNeg3, accuracies_reverse3, accuracies_dup3, accuracies_scanl3, accuracies_scanaj3, accuracies_pcfgp3, accuracies_pcfgs3 = table3(device)
+    print(f"Table3, Add dataset accuracies: {accuracies_add3}, \nAddNeg dataset accuracies: {accuracies_addNeg3},")
+    print(f"Accuracies Reverse dataset: {accuracies_reverse3}, \nAccuracies Dup dataset: {accuracies_dup3},")
+    print(f"Accuracis SCAN-l dataset: {accuracies_scanl3}, \nAccuracies SCAN-aj dataset: {accuracies_scanaj3},")
+    print(f"Accuracies PCFG-p dataset: {accuracies_pcfgp3}, \nAccuracies PCFG-s dataset: {accuracies_pcfgs3}")
+    '''
+    accuracies_add4, accuracies_addNeg4, accuracies_reverse4, accuracies_dup4, accuracies_scanl4, accuracies_scanaj4, accuracies_pcfgp4, accuracies_pcfgs4 = table4(device)
+    print(f"Table4, Add dataset accuracies: {accuracies_add4}, \nAddNeg dataset accuracies: {accuracies_addNeg4},")
+    print(f"Accuracies Reverse dataset: {accuracies_reverse4}, \nAccuracies Dup dataset: {accuracies_dup4},")
+    print(f"Accuracis SCAN-l dataset: {accuracies_scanl4}, \nAccuracies SCAN-aj dataset: {accuracies_scanaj4},")
+    print(f"Accuracies PCFG-p dataset: {accuracies_pcfgp4}, \nAccuracies PCFG-s dataset: {accuracies_pcfgs4}")
+    '''
     
     current_dir = os.path.dirname(__file__)
-    filepath1 = os.path.join(current_dir, "table1.csv")
+    #filepath1 = os.path.join(current_dir, "table1.csv")
     #filepath2 = os.path.join(current_dir, "table2.csv")
-    #filepath3 = os.path.join(current_dir, "table3.csv")
+    filepath3 = os.path.join(current_dir, "table3.csv")
     #filepath4 = os.path.join(current_dir, "table4.csv")
-
-    res1 = pd.DataFrame(data=[accuracies_add1, accuracies_addNeg1, accuracies_reverse1, accuracies_dup1], columns=["abs", "rel-e", "rel-b", "rel-eb", "rel2-e", "rel2-b", "rel2-eb"])
-    res1.index = ["Add", "AddNeg", "Reverse", "Dup"]
-    res1.to_csv(filepath1)
     '''
-    res2 = pd.DataFrame(data=[accuracies_add2, accuracies_addNeg2, accuracies_reverse2, accuracies_dup2, accuracies_cart2, accuracies_inters2], columns=["abs-c", "rel-eb-c", "rel2-eb-c"])
-    res2.index = ["Add", "AddNeg", "Reverse", "Dup", "Cart", "Inters"]
+    res1 = pd.DataFrame(data=[accuracies_add1, accuracies_addNeg1, accuracies_reverse1, accuracies_dup1, accuracies_scanl1, accuracies_scanaj1, accuracies_pcfgp1, accuracies_pcfgs1], columns=["abs", "rel-e", "rel-b", "rel-eb", "rel2-e", "rel2-b", "rel2-eb"])
+    res1.index = ["Add", "AddNeg", "Reverse", "Dup", "SCAN-l", "SCAN-aj", "PCFG-p", "PCFG-s"]
+    res1.to_csv(filepath1)
+    
+    res2 = pd.DataFrame(data=[accuracies_add2, accuracies_addNeg2, accuracies_reverse2, accuracies_dup2, accuracies_scanl2, accuracies_scanaj2, accuracies_pcfgp2, accuracies_pcfgs2], columns=["abs-c", "rel-eb-c", "rel2-eb-c"])
+    res2.index = ["Add", "AddNeg", "Reverse", "Dup", "SCAN-l", "SCAN-aj", "PCFG-p", "PCFG-s"]
     res2.to_csv(filepath2)
     '''
-    # Try transformer
-    #transformer = Transformer.ExtendedTransformer1(len(dup_vocab), len(dup_vocab), d=512, h=8, l=6, f=2048, max_seq_length_enc=25, max_seq_length_dec=50, dropout=0.0).to('cpu')
-    #optimizer = torch.optim.Adam(transformer.parameters(), lr=1e-3, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-    #scheduler = CustomSchedule(optimizer, d_model=512, warmup_steps=4000)
-    #enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(17, 34, 16, False)
-    #train_losses = train(transformer, optimizer, scheduler, dup_train_loader, 2, (enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids))
-    #torch.save(transformer.state_dict(), './transformer_try.pth')
-    #print(train_losses)
-    #transformer.load_state_dict(torch.load('./transformer_try.pth', map_location=torch.device('cpu')))
-
-    #loss0, accuracy0 = test(transformer, dup_test_loader0, (enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids))
-    #loss1, accuracy1 = test(transformer, dup_test_loader1, (enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids))
-    #enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(25, 50, 16, False)
-    #loss2, accuracy2 = test(transformer, dup_test_loader2, (enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids))
-    #loss = np.mean([loss0, loss1, loss2])
-    #accuracy = np.mean([accuracy0, accuracy1, accuracy2])
-
-    #print(f"Average loss: {loss}, average accuracy: {accuracy}")
-    
-    # Try transformer1
-    #transformer = Transformer.ExtendedTransformer1(len(add_vocab), len(add_vocab), d=512, h=8, l=6, f=2048, max_seq_length_enc=26, max_seq_length_dec=14, dropout=0.0).to('cpu')
-    #optimizer = torch.optim.Adam(transformer.parameters(), lr=1e-3, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-    #scheduler = CustomSchedule(optimizer, d_model=512, warmup_steps=4000)
-    #enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(26, 14, 16, False)
-    #train_losses = train(transformer, optimizer, scheduler, add_train_loader, 2, (enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids))
-    #torch.save(transformer.state_dict(), './transformer_try.pth')
-    #print(train_losses)
-    #transformer.load_state_dict(torch.load('./transformer_try.pth', map_location=torch.device('cpu')))
-
-    #loss, accuracy = test(transformer, add_test_loader, (enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids))
-    #print(f"Average loss: {loss}, average accuracy: {accuracy}")
-    
-    # Try transformer2
-    #transformer = Transformer.ExtendedTransformer2(len(add_vocab), len(add_vocab), d=512, h=8, l=6, f=2048, max_seq_length_enc=26, max_seq_length_dec=14, dropout=0.0)
-    #optimizer = torch.optim.Adam(transformer.parameters(), lr=1e-3, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-    #scheduler = CustomSchedule(optimizer, d_model=512, warmup_steps=4000)
-    #enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(26, 14, 16, False)
-    #train_losses = train(transformer, optimizer, scheduler, add_train_loader, 2, (enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), len(add_vocab))
-    #torch.save(transformer.state_dict(), './transformer_try.pth')
-    #print(train_losses)
-    #transformer.load_state_dict(torch.load('./transformer_try.pth', map_location=torch.device('cpu')))
-
-    #loss, accuracy = test(transformer, add_test_loader, (enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), len(add_vocab))
-    #print(f"Average loss: {loss}, average accuracy: {accuracy}")
-    
-    # Try transformer4
-    #transformer = Transformer.ExtendedTransformer4(len(add_vocab), len(add_vocab), d=512, h=8, l=6, f=2048, max_seq_length_enc=26, max_seq_length_dec=14, dropout=0.0, shared_weights=True)
-    #optimizer = torch.optim.Adam(transformer.parameters(), lr=1e-3, betas=(0.9, 0.98), eps=1e-9) # Stessi iperparametri degli autori
-    #scheduler = CustomSchedule(optimizer, d_model=512, warmup_steps=4000)
-    #enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(26, 14, 16, False)
-    #train_losses = train(transformer, optimizer, scheduler, add_train_loader, 2, (enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), len(add_vocab))
-    #torch.save(transformer.state_dict(), './transformer_try.pth')
-    #print(train_losses)
-    #transformer.load_state_dict(torch.load('./transformer_try.pth', map_location=torch.device('cpu')))
-
-    #loss, accuracy = test(transformer, add_test_loader, (enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids), len(add_vocab))
-    #print(f"Average loss: {loss}, average accuracy: {accuracy}")
-    #for i in range(3):
-     #   train_input, train_targets = next(iter(add_dataset_train))
-      #  enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids = Encoding.create_relative_ids(26, 14, 16, False)
-       # output = model(train_input, train_targets, enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids, len(add_vocab))
-        #print(output)
+    res3 = pd.DataFrame(data=[accuracies_add3, accuracies_addNeg3, accuracies_reverse3, accuracies_dup3, accuracies_scanl3, accuracies_scanaj3, accuracies_pcfgp3, accuracies_pcfgs3], columns=["small-4", "small-6", "large-2", "large-4", "large-6"])
+    res3.index = ["Add", "AddNeg", "Reverse", "Dup", "SCAN-l", "SCAN-aj", "PCFG-p", "PCFG-s"]
+    res3.to_csv(filepath3)
+    '''
+    res4 = pd.DataFrame(data=[accuracies_add4, accuracies_addNeg4, accuracies_reverse4, accuracies_dup4, accuracies_scanl4, accuracies_scanaj4, accuracies_pcfgp4, accuracies_pcfgs4], columns=["small-2s", "small-4s", "small-6s", "large-2s", "large-4s", "large-6s"])
+    res4.index = ["Add", "AddNeg", "Reverse", "Dup", "SCAN-l", "SCAN-aj", "PCFG-p", "PCFG-s"]
+    res4.to_csv(filepath4)
+    '''
 
     sys.exit(0)
+
 
 if __name__ == "__main__":
     main()

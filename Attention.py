@@ -1,15 +1,13 @@
-# Imports
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-import math
-import Encoding
+
 
 class MultiHeadAttention(nn.Module):
     def __init__(self, d_model, num_heads):
         super(MultiHeadAttention, self).__init__()
         # Model dimension (d_model) has to be divisible by the number of heads
-        assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
+        assert d_model % num_heads == 0 # d_model must be divisible by num_heads
 
         # Initialize dimensions
         self.d_model = d_model # Model's dimension
@@ -18,13 +16,17 @@ class MultiHeadAttention(nn.Module):
 
         # Linear layers for transforming inputs
         self.w_q = nn.Linear(d_model, d_model) # Query
-        torch.nn.init.xavier_uniform_(self.w_q.weight) # Dense layer initialized with Glorot initializer
+        torch.nn.init.xavier_uniform_(self.w_q.weight.T) # Dense layer initialized with Glorot initializer
+        torch.nn.init.zeros_(self.w_q.bias)
         self.w_k = nn.Linear(d_model, d_model) # Key
-        torch.nn.init.xavier_uniform_(self.w_k.weight) # Dense layer initialized with Glorot initializer
+        torch.nn.init.xavier_uniform_(self.w_k.weight.T) # Dense layer initialized with Glorot initializer
+        torch.nn.init.zeros_(self.w_k.bias)
         self.w_v = nn.Linear(d_model, d_model) # Value
-        torch.nn.init.xavier_uniform_(self.w_v.weight) # Dense layer initialized with Glorot initializer
+        torch.nn.init.xavier_uniform_(self.w_v.weight.T) # Dense layer initialized with Glorot initializer
+        torch.nn.init.zeros_(self.w_v.bias)
         self.w_o = nn.Linear(d_model, d_model) # Output
-        torch.nn.init.xavier_uniform_(self.w_o.weight) # Dense layer initialized with Glorot initializer
+        torch.nn.init.xavier_uniform_(self.w_o.weight.T) # Dense layer initialized with Glorot initializer
+        torch.nn.init.zeros_(self.w_o.bias)
 
         #self.scale = torch.sqrt(torch.FloatTensor([self.dim_qkv]))
     
@@ -35,14 +37,13 @@ class MultiHeadAttention(nn.Module):
         dk = K.size(-1)
         attention_scores = attention_scores / torch.sqrt(torch.tensor(dk, dtype=torch.float32))
 
-        #print(attention_scores.shape)
 
         # Apply mask if provided (useful for preventing attention to certain parts like padding)
         if mask is not None:
             #print(attention_scores.shape)
             #print(f"mask shape: {mask.shape}")
             #attention_scores = attention_scores.masked_fill(mask == 0, -1e9)
-            attention_scores += (mask * 1e-9)
+            attention_scores = attention_scores.masked_fill(mask == 0, -1e9)
         
         # Softmax is applied to obtain attention probabilities
         attention_probabilities = F.softmax(attention_scores, dim=-1) # (batch_size, num_heads, seq_len_q, seq_len_k)
@@ -50,6 +51,7 @@ class MultiHeadAttention(nn.Module):
         # Multiply by values to obtain the final output
         output = torch.matmul(attention_probabilities, V) # (batch_size, num_heads, seq_len_q, dim_qkv)
         #print(output.shape)
+        #print(output[0])
         return output, attention_scores
 
     def split_heads(self, x):
@@ -107,7 +109,7 @@ class MultiHeadAttention_relE(MultiHeadAttention):
 
         # Apply mask if provided (useful for preventing attention to certain parts like padding)
         if mask is not None:
-            attention_scores += (mask * 1e-9)
+            attention_scores = attention_scores.masked_fill(mask == 0, -1e9)
         
         # Softmax is applied to obtain attention probabilities
         attention_weights = F.softmax(attention_scores, dim=-1)
@@ -152,7 +154,7 @@ class MultiHeadAttention_relB(MultiHeadAttention):
 
         # Apply mask if provided (useful for preventing attention to certain parts like padding)
         if mask is not None:
-            attention_scores += (mask * 1e-9)
+            attention_scores = attention_scores.masked_fill(mask == 0, -1e9)
         
         # Softmax is applied to obtain attention probabilities
         attention_weights = F.softmax(attention_scores, dim=-1)
@@ -204,7 +206,7 @@ class MultiHeadAttention_relEB(MultiHeadAttention):
 
         # Apply mask if provided (useful for preventing attention to certain parts like padding)
         if mask is not None:
-            attention_scores += (mask * 1e-9)
+            attention_scores = attention_scores.masked_fill(mask == 0, -1e9)
         
         # Softmax is applied to obtain attention probabilities
         attention_weights = F.softmax(attention_scores, dim=-1)
