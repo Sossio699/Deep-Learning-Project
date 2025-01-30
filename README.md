@@ -12,3 +12,5 @@ The code aims to replicate the first 4 tables shown in the paper.
 * Transformer.py contains the standard Transformer implementation, as well as the improved architectures suggested in the paper.
 * The code to train and evaluate the varius models, and so to replicate the first 4 tables, is in the file main.py.
 * Finally, the 4 .csv files contains the results.
+
+Regarding files for datasets PCFG and SCAN, links to download them are available in parer's authors github (link in paper).
