@@ -3,44 +3,17 @@ import torch.nn as nn
 from torch.nn import functional as F
 import Attention
 import Encoding
-import math
-import numpy as np
 
 
-# Layer Normalization
-class LayerNorm(nn.Module):
-    def __init__(self, d_model, eps=1e-6):
-        super(LayerNorm, self).__init__()
-        self.gamma = nn.Parameter(torch.ones(d_model))
-        self.beta = nn.Parameter(torch.zeros(d_model))
-        self.eps = eps
-
-    def forward(self, x):
-        mean = x.mean(-1, keepdim=True)
-        std = x.std(-1, keepdim=True)
-        return self.gamma * (x - mean) / (std + self.eps) + self.beta
-    
-# Dropout
-class Dropout(nn.Module):
-    def __init__(self, p=0.1):
-        super(Dropout, self).__init__()
-        self.p = p
-
-    def forward(self, x):
-        if not self.training:
-            return x
-        mask = (torch.rand(x.shape) > self.p).float().to('cuda')
-        return mask * x / (1 - self.p)
-
-# FC layers are applied along the last (512) dimension
+# Feed Forward block
 class FeedForward(nn.Module):
     def __init__(self, d_model, hidden):
         super(FeedForward, self).__init__()
         self.linear1 = nn.Linear(d_model, hidden)
-        torch.nn.init.xavier_uniform_(self.linear1.weight.T) # Dense layer initialized with Glorot initializer
+        torch.nn.init.xavier_uniform_(self.linear1.weight.T) # FC layer weights initialized with Glorot initializer
         torch.nn.init.zeros_(self.linear1.bias)
         self.linear2 = nn.Linear(hidden, d_model)
-        torch.nn.init.xavier_uniform_(self.linear2.weight.T) # Dense layer initialized with Glorot initializer
+        torch.nn.init.xavier_uniform_(self.linear2.weight.T) # FC layer weights initialized with Glorot initializer
         torch.nn.init.zeros_(self.linear2.bias)
         self.relu = nn.ReLU(inplace=True)
 
@@ -51,14 +24,15 @@ class FeedForward(nn.Module):
         return x # (batch_size, seq_len, d)
 
 
+# Encoder layer
 class EncoderLayer(nn.Module):
     def __init__(self, d_model, num_heads, ffn_hidden):
         super(EncoderLayer, self).__init__()
         self.attention = Attention.MultiHeadAttention(d_model, num_heads)
-        self.norm1 = nn.LayerNorm(d_model, eps=1e-6)#, elementwise_affine=False, bias=False)
+        self.norm1 = nn.LayerNorm(d_model, eps=1e-6)
 
         self.ffn = FeedForward(d_model, ffn_hidden)
-        self.norm2 = nn.LayerNorm(d_model, eps=1e-6)#, elementwise_affine=False, bias=False)
+        self.norm2 = nn.LayerNorm(d_model, eps=1e-6)
 
         self.dropout1 = nn.Dropout(p=0.1)
         self.dropout2 = nn.Dropout(p=0.1)
@@ -79,6 +53,7 @@ class EncoderLayer(nn.Module):
         output = self.norm2(ff_in + ff_output) # (batch_size, input_sequence_length, d)
         return output
 
+# Encoder layer with relative positional encoding
 class ExtendedEncoderLayer(EncoderLayer):
     def __init__(self, d_model, num_heads, ffn_hidden, attention):
         super(ExtendedEncoderLayer, self).__init__(d_model, num_heads, ffn_hidden)
@@ -108,17 +83,18 @@ class ExtendedEncoderLayer(EncoderLayer):
         return output
 
 
+# Decoder layer
 class DecoderLayer(nn.Module):
     def __init__(self, d_model, num_heads, ffn_hidden):
         super(DecoderLayer, self).__init__()
         self.self_attention = Attention.MultiHeadAttention(d_model, num_heads)
-        self.norm1 = nn.LayerNorm(d_model, eps=1e-6)#, elementwise_affine=False, bias=False)
+        self.norm1 = nn.LayerNorm(d_model, eps=1e-6)
 
         self.cross_attention = Attention.MultiHeadAttention(d_model, num_heads)
-        self.norm2 = nn.LayerNorm(d_model, eps=1e-6)#, elementwise_affine=False, bias=False)
+        self.norm2 = nn.LayerNorm(d_model, eps=1e-6)
 
         self.ffn = FeedForward(d_model, ffn_hidden)
-        self.norm3 = nn.LayerNorm(d_model, eps=1e-6)#, elementwise_affine=False, bias=False)
+        self.norm3 = nn.LayerNorm(d_model, eps=1e-6)
 
         self.dropout1 = nn.Dropout(p=0.1)
         self.dropout2 = nn.Dropout(p=0.1)
@@ -147,9 +123,11 @@ class DecoderLayer(nn.Module):
         output = self.norm3(ff_in + ff_output) # (batch_size, trg_seq_len, d)
         return output
 
+# Decoder layer with relative positional encoding
 class ExtendedDecoderLayer(DecoderLayer):
     def __init__(self, d_model, num_heads, ffn_hidden, attention="rel-eb"):
         super(ExtendedDecoderLayer, self).__init__(d_model, num_heads, ffn_hidden)
+        
         if attention == "rel-e":
             self.self_attention = Attention.MultiHeadAttention_relE(d_model, num_heads)
         elif attention == "rel-b":
@@ -173,7 +151,6 @@ class ExtendedDecoderLayer(DecoderLayer):
     
     def forward(self, x, enc_output, dec_relative_ids1, dec2enc_relative_ids, src_mask=None, trg_mask=None):
         # Compute self attention
-        #print("Decoder self attention")
         a_output, _ = self.self_attention(Q=x, K=x, V=x, relative_ids=dec_relative_ids1, mask=trg_mask)
 
         # Add and norm
@@ -199,6 +176,7 @@ class ExtendedDecoderLayer(DecoderLayer):
         return output
 
 
+# Encoder block
 class Encoder(nn.Module):
     def __init__(self, n_layers, d_model, num_heads, ffn_hidden):
         super(Encoder, self).__init__()
@@ -209,7 +187,8 @@ class Encoder(nn.Module):
             x = layer(x, src_mask)
 
         return x 
-    
+
+# Encoder block with relative positional encoding   
 class ExtendedEncoder(Encoder):
     def __init__(self, n_layers, d_model, num_heads, ffn_hidden, attention="rel-eb", shared_weights=False):
         super(ExtendedEncoder, self).__init__(n_layers, d_model, num_heads, ffn_hidden)
@@ -226,6 +205,7 @@ class ExtendedEncoder(Encoder):
         return x
 
 
+# Decoder block
 class Decoder(nn.Module):
     def __init__(self, n_layers, d_model, num_heads, ffn_hidden):
         super(Decoder, self).__init__()
@@ -237,6 +217,7 @@ class Decoder(nn.Module):
         
         return trg
 
+# Decoder block with relative positional encoding
 class ExtendedDecoder(Decoder):
     def __init__(self, n_layers, d_model, num_heads, ffn_hidden, attention="rel-eb", shared_weights=False):
         super(ExtendedDecoder, self).__init__(n_layers, d_model, num_heads, ffn_hidden)
@@ -257,10 +238,11 @@ class ExtendedDecoder(Decoder):
 # d: dimensionality of token embeddings
 # f: intermediate dimensionality used by the feed-forward sublayer
 # h: number of attention-heads in the attention sublayers
+# Standard Transformer model
 class Transformer(nn.Module):
     def __init__(self, src_vocab_size, trg_vocab_size, d, h, l, f, max_seq_length_enc, max_seq_length_dec):
         super(Transformer, self).__init__()
-        self.encoder_embedding = nn.Embedding(src_vocab_size, d, padding_idx=0) # for Add dataset, 14 tensors of size 64
+        self.encoder_embedding = nn.Embedding(src_vocab_size, d, padding_idx=0)
         torch.nn.init.uniform_(self.encoder_embedding.weight, -0.05, 0.05) # Embedding layer initialized with U(-0.05, 0.05)
         self.decoder_embedding = nn.Embedding(trg_vocab_size, d, padding_idx=0)
         torch.nn.init.uniform_(self.decoder_embedding.weight, -0.05, 0.05) # Embedding layer initialized with U(-0.05, 0.05)
@@ -275,7 +257,7 @@ class Transformer(nn.Module):
         self.decoder = Decoder(l, d, h, f)
 
         self.fc = nn.Linear(d, trg_vocab_size)
-        torch.nn.init.xavier_uniform_(self.fc.weight.T) # Dense layer initialized with Glorot initializer
+        torch.nn.init.xavier_uniform_(self.fc.weight.T) # FC layer initialized with Glorot initializer
         torch.nn.init.zeros_(self.fc.bias)
 
         self.dropout_src = nn.Dropout(p=0.1)
@@ -294,7 +276,7 @@ class Transformer(nn.Module):
         return mask.to(device) 
 
     def forward(self, src, trg):
-        torch.autograd.set_detect_anomaly(True)
+        # source and target embedding and absolute positional encoding
         src_embedded = self.encoder_embedding(src) * torch.sqrt(torch.tensor(self.d, dtype=torch.float32))
         src_embedded = self.positional_encoding_enc(src_embedded)
         src_embedded = self.dropout_src(src_embedded)
@@ -302,24 +284,26 @@ class Transformer(nn.Module):
         trg_embedded = self.decoder_embedding(trg) * torch.sqrt(torch.tensor(self.d, dtype=torch.float32))
         trg_embedded = self.positional_encoding_dec(trg_embedded)
         trg_embedded = self.dropout_trg(trg_embedded)
-        
+        # Encoder
         enc_output = src_embedded
         src_mask = self.create_padding_mask(src) # Encoder padding mask 
         enc_output = self.encoder(enc_output, src_mask)
-
+        # Decoder
         dec_output = trg_embedded
         src_mask = self.create_padding_mask(src) # Used in the 2nd attention block in the decoder. This padding mask is used to mask the encoder outputs.
 
         look_ahead_mask = self.create_look_ahead_mask(trg.shape[1])
         dec_trg_padding_mask = self.create_padding_mask(trg)
-        trg_mask = torch.maximum(look_ahead_mask, dec_trg_padding_mask) # Used in the 1st attention block in the decoder. It is used to pad and mask future tokens in the input received by the decoder.
+        trg_mask = torch.maximum(look_ahead_mask, dec_trg_padding_mask) # Used in the 1st attention block in the decoder.
+                                                                        # It is used to pad and mask future tokens in the input received by the decoder.
 
         dec_output = self.decoder(dec_output, enc_output, trg_mask, src_mask)
-        
+        # output logits
         output = self.fc(dec_output)
         return output
-    
 
+
+# Transformer model with relative positional encoding
 class ExtendedTransformer1(Transformer):
     def __init__(self, src_vocab_size, trg_vocab_size, d, h, l, f, max_seq_length_enc, max_seq_length_dec, attention="rel-eb"):
         super(ExtendedTransformer1, self).__init__(src_vocab_size, trg_vocab_size, d, h, l ,f, max_seq_length_enc, max_seq_length_dec)
@@ -330,63 +314,69 @@ class ExtendedTransformer1(Transformer):
         self.positional_encoding_dec = None
     
     def forward(self, src, trg, enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids):
-        torch.autograd.set_detect_anomaly(True)
+        # source and target embedding
         src_embedded = self.encoder_embedding(src) * torch.sqrt(torch.tensor(self.d, dtype=torch.float32))
         src_embedded = self.dropout_src(src_embedded)
 
         trg_embedded = self.decoder_embedding(trg) * torch.sqrt(torch.tensor(self.d, dtype=torch.float32))
         trg_embedded = self.dropout_trg(trg_embedded)
-
+        # Encoder
         enc_output = src_embedded
         src_mask = self.create_padding_mask(src) # Encoder padding mask
         enc_output = self.encoder(enc_output, enc_relative_ids, src_mask)
-
+        # Decoder
         dec_output = trg_embedded
         src_mask = self.create_padding_mask(src) # Used in the 2nd attention block in the decoder. This padding mask is used to mask the encoder outputs.
 
         look_ahead_mask = self.create_look_ahead_mask(trg.shape[1])
         dec_trg_padding_mask = self.create_padding_mask(trg)
-        trg_mask = torch.maximum(look_ahead_mask, dec_trg_padding_mask) # Used in the 1st attention block in the decoder. It is used to pad and mask future tokens in the input received by the decoder.
+        trg_mask = torch.maximum(look_ahead_mask, dec_trg_padding_mask) # Used in the 1st attention block in the decoder.
+                                                                        # It is used to pad and mask future tokens in the input received by the decoder.
         
         dec_output = self.decoder(dec_output, enc_output, dec_relative_ids1, dec2enc_relative_ids, trg_mask, src_mask)
-
+        # output logits
         output = self.fc(dec_output)
         return output
 
 
+# Copy decoder block
 class CopyDecoder(nn.Module):
     def __init__(self, d_model, num_heads):
         super(CopyDecoder, self).__init__()
         self.attention = Attention.MultiHeadAttention(d_model, num_heads) # Scaled Dot Product Attention
 
         self.fcQ = nn.Linear(d_model, d_model)
-        torch.nn.init.xavier_uniform_(self.fcQ.weight.T) # Dense layer initialized with Glorot initializer
+        torch.nn.init.xavier_uniform_(self.fcQ.weight.T) # FC layer initialized with Glorot initializer
         torch.nn.init.zeros_(self.fcQ.bias)
         self.fcw = nn.Linear(d_model, 1)
-        torch.nn.init.xavier_uniform_(self.fcw.weight.T) # Dense layer initialized with Glorot initializer
+        torch.nn.init.xavier_uniform_(self.fcw.weight.T) # FC layer initialized with Glorot initializer
         torch.nn.init.zeros_(self.fcw.bias)
     
     # p1 is the Transformer output without the Copy Decoder
     def forward(self, src_vocab_size, dec_output, enc_output, src, p1):
+        # one hot encoding of source tokens -> value
         src_one_hot = F.one_hot(src, src_vocab_size)
         src_one_hot = src_one_hot.float()
-        #print(src_one_hot.shape)
+        # learned query based on decoder outputs
         copy_query = self.fcQ(dec_output)
-        a_output, _ = self.attention(Q=copy_query, K=enc_output, V=src_one_hot, copy=True) # Authors do not use any mask
+        # embeddings of last encoder layer are used as keys in the following attention
+        a_output, _ = self.attention(Q=copy_query, K=enc_output, V=src_one_hot, copy=True) # no mask
         p2 = torch.softmax(a_output, dim=-1)
-
+        # learnable weight 
         w = torch.sigmoid(self.fcw(dec_output))
+        # output probability distribution
         output = (p2 * w) + ((1 - w) * p1)
 
         return output
 
+# Transformer model with copy decoder and absolute positional encoding
 class ExtendedStdTransformer2(Transformer):
     def __init__(self, src_vocab_size, trg_vocab_size, d, h, l, f, max_seq_length_enc, max_seq_length_dec):
         super(ExtendedStdTransformer2, self).__init__(src_vocab_size, trg_vocab_size, d, h, l, f, max_seq_length_enc, max_seq_length_dec)
         self.copy_decoder = CopyDecoder(d, h)
 
     def forward(self, src, trg, src_vocab_size):
-        torch.autograd.set_detect_anomaly(True)
+        # source and target embedding and absolute positional encoding
         src_embedded = self.encoder_embedding(src) * torch.sqrt(torch.tensor(self.d, dtype=torch.float32))
         src_embedded = self.positional_encoding_enc(src_embedded)
         src_embedded = self.dropout_src(src_embedded)
@@ -394,57 +384,61 @@ class ExtendedStdTransformer2(Transformer):
         trg_embedded = self.decoder_embedding(trg) * torch.sqrt(torch.tensor(self.d, dtype=torch.float32))
         trg_embedded = self.positional_encoding_dec(trg_embedded)
         trg_embedded = self.dropout_trg(trg_embedded)
-
+        # Encoder
         enc_output = src_embedded
         src_mask = self.create_padding_mask(src) # Encoder padding mask
         enc_output = self.encoder(enc_output, src_mask)
-
+        # Decoder
         dec_output = trg_embedded
         src_mask = self.create_padding_mask(src) # Used in the 2nd attention block in the decoder. This padding mask is used to mask the encoder outputs.
 
         look_ahead_mask = self.create_look_ahead_mask(trg.size(1))
         dec_trg_padding_mask = self.create_padding_mask(trg)
-        trg_mask = torch.maximum(look_ahead_mask, dec_trg_padding_mask) # Used in the 1st attention block in the decoder. It is used to pad and mask future tokens in the input received by the decoder.
+        trg_mask = torch.maximum(look_ahead_mask, dec_trg_padding_mask) # Used in the 1st attention block in the decoder. 
+                                                                        # It is used to pad and mask future tokens in the input received by the decoder.
         
         dec_output = self.decoder(dec_output, enc_output, trg_mask, src_mask)
         output = F.softmax(self.fc(dec_output), dim=-1)
-
-        copy_output = self.copy_decoder(src_vocab_size, dec_output, enc_output, src, output) # TODO modificare come nel codice degli autori
+        # Copy Decoder -> output probability distribution
+        copy_output = self.copy_decoder(src_vocab_size, dec_output, enc_output, src, output)
 
         return copy_output
 
+# Transformer model with copy decoder and relative positional encoding
 class ExtendedTransformer2(ExtendedTransformer1):
     def __init__(self, src_vocab_size, trg_vocab_size, d, h, l, f, max_seq_length_enc, max_seq_length_dec, attention="rel-eb"):
         super(ExtendedTransformer2, self).__init__(src_vocab_size, trg_vocab_size, d, h, l, f, max_seq_length_enc, max_seq_length_dec, attention)
         self.copy_decoder = CopyDecoder(d, h)
     
     def forward(self, src, trg, enc_relative_ids, dec_relative_ids1, dec2enc_relative_ids, src_vocab_size):
-        torch.autograd.set_detect_anomaly(True)
+        # source and target embedding
         src_embedded = self.encoder_embedding(src) * torch.sqrt(torch.tensor(self.d, dtype=torch.float32))
         src_embedded = self.dropout_src(src_embedded)
 
         trg_embedded = self.decoder_embedding(trg) * torch.sqrt(torch.tensor(self.d, dtype=torch.float32))
         trg_embedded = self.dropout_trg(trg_embedded)
-
+        # Encoder
         enc_output = src_embedded
         src_mask = self.create_padding_mask(src) # Encoder padding mask
         enc_output = self.encoder(enc_output, enc_relative_ids, src_mask)
-
+        # Decoder
         dec_output = trg_embedded
         src_mask = self.create_padding_mask(src) # Used in the 2nd attention block in the decoder. This padding mask is used to mask the encoder outputs.
 
         look_ahead_mask = self.create_look_ahead_mask(trg.size(1))
         dec_trg_padding_mask = self.create_padding_mask(trg)
-        trg_mask = torch.maximum(look_ahead_mask, dec_trg_padding_mask) # Used in the 1st attention block in the decoder. It is used to pad and mask future tokens in the input received by the decoder.
+        trg_mask = torch.maximum(look_ahead_mask, dec_trg_padding_mask) # Used in the 1st attention block in the decoder.
+                                                                        # It is used to pad and mask future tokens in the input received by the decoder.
         
         dec_output = self.decoder(dec_output, enc_output, dec_relative_ids1, dec2enc_relative_ids, trg_mask, src_mask)
         output = F.softmax(self.fc(dec_output), dim=-1)
-
-        copy_output = self.copy_decoder(src_vocab_size, dec_output, enc_output, src, output) #TODO modificare come nel codice degli autori
-
+        # Copy Decoder
+        copy_output = self.copy_decoder(src_vocab_size, dec_output, enc_output, src, output)
+        # output probability distribution
         return copy_output
 
 
+# Transformer model with copy decoder, relative positional embedding and shared weights between encoder layers and decoder layers
 class ExtendedTransformer4(ExtendedTransformer2):
     def __init__(self, src_vocab_size, trg_vocab_size, d, h, l, f, max_seq_length_enc, max_seq_length_dec, attention="rel-eb", shared_weights=True):
         super(ExtendedTransformer4, self).__init__(src_vocab_size, trg_vocab_size, d, h, l, f, max_seq_length_enc, max_seq_length_dec, attention)

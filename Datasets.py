@@ -1,6 +1,5 @@
 import random
-import torch
-import torch.nn.functional as F
+# tensorflow imported only to read SCAN and PCFG datasets with authors code
 from tensorflow import compat as ttf
 tf=ttf.v1
 
@@ -45,34 +44,6 @@ def create_dataset_tensors(examples_in_raw, examples_out_raw, max_len_in, max_le
         out_tensors.append(pad_tensor)
     
     return in_tensors, out_tensors
-
-def create_dataset_tensors2(examples_in_raw, examples_out_raw, max_len_in, max_len_out, vocab_to_int):
-    in_list = []
-    for example in examples_in_raw:
-        list = [vocab_to_int[x] for x in example]
-        tensor = torch.as_tensor(list)
-        in_list.append(tensor)
-    out_list = []
-    for example in examples_out_raw:
-        list = [vocab_to_int[x] for x in example]
-        tensor = torch.as_tensor(list)
-        out_list.append(tensor)
-
-    in_tensors = []
-    out_tensors = []
-    for tensor in in_list:
-        pad_tensor = F.pad(tensor, (0, max_len_in - tensor.shape[-1]), "constant", 0)
-        in_tensors.append(pad_tensor)
-    for tensor in out_list:
-        pad_tensor = F.pad(tensor, (0, max_len_out - tensor.shape[-1]), "constant", 0)
-        out_tensors.append(pad_tensor)
-    in_tensor = torch.stack(in_tensors, dim=0)
-    out_tensor = torch.stack(out_tensors, dim=0)
-
-    print(f"In tensor shape: {in_tensor.shape}")
-    print(f"Out tensor shape: {out_tensor.shape}")
-
-    return in_tensor, out_tensor
 
 
 # Functions to create datasets
@@ -318,40 +289,6 @@ def create_scan_dataset(train_filename, test_filename):
 
         return in_pad_tensors, out_pad_tensors, max_len_input, max_len_target
 
-    def create_dataset_tensors_scan2(instances, max_len_inp = None, max_len_targ = None):
-        in_tensor_list = []
-        out_tensor_list = []
-        for instance in instances:
-            # keep only the first and last steps (ignore intermediate steps)
-            in_tensor_list.append(instance[0])
-            out_tensor_list.append(instance[-1])
-        
-        max_len_input = max_length(in_tensor_list)
-        max_len_target = max_length(out_tensor_list)
-
-        in_tensors = []
-        out_tensors = []
-        for instance in instances:
-            in_tensors.append(torch.as_tensor(instance[0]))
-            out_tensors.append(torch.as_tensor(instance[-1]))
-        
-        in_pad_tensors = []
-        out_pad_tensors = []
-        for tensor in in_tensors:
-            if max_len_inp is not None:
-                pad_tensor = F.pad(tensor, (0, max_len_inp - tensor.shape[-1]), "constant", 0)
-            else:
-                pad_tensor = F.pad(tensor, (0, max_len_input - tensor.shape[-1]), "constant", 0)
-            in_pad_tensors.append(pad_tensor)
-        for tensor in out_tensors:
-            if max_len_targ is not None:
-                pad_tensor = F.pad(tensor, (0, max_len_targ - tensor.shape[-1]), "constant", 0)
-            else:
-                pad_tensor = F.pad(tensor, (0, max_len_target - tensor.shape[-1]), "constant", 0)
-            out_pad_tensors.append(pad_tensor)
-    
-        return in_pad_tensors, out_pad_tensors, max_len_input, max_len_target
-    
     def tokenize_scan_line(line, vocab, vocab_to_int):
         instance_in_split = line.split(" ")
 
@@ -381,8 +318,8 @@ def create_scan_dataset(train_filename, test_filename):
         print("# instances: " + str(len(instances)))
         return instances_raw, instances
     
-    instances_train_raw, instances_train = load_and_tokenize_data(train_filename)
-    instances_test_raw, instances_test = load_and_tokenize_data(test_filename)
+    _, instances_train = load_and_tokenize_data(train_filename)
+    _, instances_test = load_and_tokenize_data(test_filename)
 
     input_tensor_train, target_tensor_train, max_len_inp_train, max_len_targ_train = create_dataset_tensors_scan(instances_train)
     input_tensor_val, target_tensor_val, max_len_inp_test, max_len_targ_test = create_dataset_tensors_scan(instances_test)
@@ -447,48 +384,6 @@ def create_pcfg_datset(pcfg_split):
             out_pad_tensors.append(pad_tensor)
     
         return in_pad_tensors, out_pad_tensors, max_len_input, max_len_target
-
-    def create_dataset_tensors_pcfg2(instances, max_len_inp=None, max_len_targ=None):
-        in_tensor_list = []
-        out_tensor_list = []
-        for instance in instances:
-            for i in range(len(instance) - 1):
-                in_tensor_list.append(instance[i])
-                out_tensor_list.append(instance[i + 1])
-        
-        max_len_input = max_length(in_tensor_list)
-        max_len_target = max_length(out_tensor_list)
-
-        in_tensors = []
-        out_tensors = []
-        for instance in instances:
-            in_instance = []
-            out_instance = []
-            for i in range(len(instance) - 1):
-                in_tensors.append(torch.as_tensor(instance[i]))
-                out_tensors.append(torch.as_tensor(instance[i + 1]))
-                #in_instance.append(instance[i]) TODO scegliere quale delle due usare
-                #out_instance.append(instance[i + 1])
-            #in_tensors.append(torch.as_tensor(in_instance))
-            #out_tensors.append(torch.as_tensor(out_instance))
-                
-        
-        in_pad_tensors = []
-        out_pad_tensors = []
-        for tensor in in_tensors:
-            if max_len_inp is not None:
-                pad_tensor = F.pad(tensor, (0, max_len_inp - tensor.shape[-1]), "constant", 0)
-            else:
-                pad_tensor = F.pad(tensor, (0, max_len_input - tensor.shape[-1]), "constant", 0)
-            in_pad_tensors.append(pad_tensor)
-        for tensor in out_tensors:
-            if max_len_targ is not None:
-                pad_tensor = F.pad(tensor, (0, max_len_targ - tensor.shape[-1]), "constant", 0)
-            else:
-                pad_tensor = F.pad(tensor, (0, max_len_target - tensor.shape[-1]), "constant", 0)
-            out_pad_tensors.append(pad_tensor)
-    
-        return in_pad_tensors, out_pad_tensors, max_len_input, max_len_target
     
     def load_and_tokenize_data(filename, maxlen):
         max_in_len = 0
@@ -522,8 +417,8 @@ def create_pcfg_datset(pcfg_split):
         print("max_out_len: " + str(max_out_len))
         return instances_raw, instances
     
-    instances_train_raw, instances_train = load_and_tokenize_data("pcfg_" + pcfg_split + "_train", MAX_TRAIN_LEN)
-    instances_test_raw, instances_test = load_and_tokenize_data("pcfg_" + pcfg_split + "_test", MAX_TEST_LEN)
+    _, instances_train = load_and_tokenize_data("pcfg_" + pcfg_split + "_train", MAX_TRAIN_LEN)
+    _, instances_test = load_and_tokenize_data("pcfg_" + pcfg_split + "_test", MAX_TEST_LEN)
 
     input_tensor_train, target_tensor_train, max_len_inp_train, max_len_targ_train = create_dataset_tensors_pcfg(instances_train)
     input_tensor_val, target_tensor_val, max_len_inp_test, max_len_targ_test = create_dataset_tensors_pcfg(instances_test)
