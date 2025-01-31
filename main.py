@@ -342,7 +342,7 @@ def get_results_Table1(vocab, max_len_enc, max_len_dec, epochs, train_loader,
         transformers_rel = [transformer_relE, transformer_relB, transformer_relEB]
         transformers_rel2 = [transformer_rel2E, transformer_rel2B, transformer_rel2EB]
         # optimizer
-        optimizer = ScheduledOptim(torch.optim.Adam(transformer_abs.parameters(), lr=1e-5, betas=(0.9, 0.98), eps=1e-9), 0.008, 64, 4000)
+        optimizer = ScheduledOptim(torch.optim.Adam(transformer_abs.parameters(), lr=1e-5, betas=(0.9, 0.98), eps=1e-9), 1, 64, 4000)
         # Standard Transformer and ExtendedTransformer1 does not have a final Softmax layer in order to use CrossEntropyLoss as criterion
         criterion = torch.nn.CrossEntropyLoss(ignore_index=0)
         # training epochs related to Standard Transformer
@@ -363,7 +363,7 @@ def get_results_Table1(vocab, max_len_enc, max_len_dec, epochs, train_loader,
               
         for transformer in transformers_rel:
             # optimizer
-            optimizer = ScheduledOptim(torch.optim.Adam(transformer.parameters(), lr=1e-5, betas=(0.9, 0.98), eps=1e-9), 0.008, 64, 4000)
+            optimizer = ScheduledOptim(torch.optim.Adam(transformer.parameters(), lr=1e-5, betas=(0.9, 0.98), eps=1e-9), 1, 64, 4000)
             # Standard Transformer and ExtendedTransformer1 does not have a final Softmax layer in order to use CrossEntropyLoss as criterion
             criterion = torch.nn.CrossEntropyLoss(ignore_index=0)
             # relative positional ids
@@ -389,7 +389,7 @@ def get_results_Table1(vocab, max_len_enc, max_len_dec, epochs, train_loader,
 
         for transformer in transformers_rel2:
             # optimizer
-            optimizer = ScheduledOptim(torch.optim.Adam(transformer.parameters(), lr=1e-5, betas=(0.9, 0.98), eps=1e-9), 0.008, 64, 4000)
+            optimizer = ScheduledOptim(torch.optim.Adam(transformer.parameters(), lr=1e-5, betas=(0.9, 0.98), eps=1e-9), 1, 64, 4000)
             # Standard Transformer and ExtendedTransformer1 does not have a final Softmax layer in order to use CrossEntropyLoss as criterion
             criterion = torch.nn.CrossEntropyLoss(ignore_index=0)
             # relative positional ids
